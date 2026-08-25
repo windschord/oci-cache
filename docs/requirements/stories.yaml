@@ -1,0 +1,45 @@
+# ユーザーストーリー
+# acceptance は書かない（要求側の stories フィールドで紐付ける）
+
+stories:
+  - id: US-001
+    as_a: ワークステーションでコンテナを扱う利用者
+    i_want: 上流レジストリを識別するパス要素を付けずにイメージを取得したい
+    so_that: 既存の compose ファイルと手元の手順を書き換えずにキャッシュを経由できる
+    status: active
+
+  - id: US-002
+    as_a: kubeadm で構築した Kubernetes クラスタの管理者
+    i_want: containerd のミラー設定だけでキャッシュを経由させたい
+    so_that: マニフェストに書いたイメージ参照を一切変更せずにクラスタ全体へ適用できる
+    status: active
+
+  - id: US-003
+    as_a: ホームラボの運用者
+    i_want: 何がどれだけ保持されているかを画面で確認したい
+    so_that: 設定順序と有効期間を調整する根拠が得られる
+    status: active
+
+  - id: US-004
+    as_a: ホームラボの運用者
+    i_want: 同じイメージを繰り返し取得しても上流レジストリへ問い合わせないでほしい
+    so_that: Docker Hub の要求回数制限と回線帯域に配備を妨げられない
+    status: active
+
+  - id: US-005
+    as_a: ホームラボの運用者
+    i_want: 保存領域が上限に達したら古いものから自動で整理してほしい
+    so_that: ディスクを使い切って同居する他のサービスを巻き込んで停止させない
+    status: active
+
+  - id: US-006
+    as_a: ホームラボの運用者
+    i_want: 単一の実行ファイルで資源の限られた機器に配備したい
+    so_that: 運用対象の構成要素を増やさずに済む
+    status: active
+
+  - id: US-007
+    as_a: アクセス制御を管理する運用者
+    i_want: 非公開イメージが認証を持たない利用者へ配信されないようにしたい
+    so_that: 上流レジストリのアクセス制御を迂回する経路を作らない
+    status: active

@@ -1,0 +1,65 @@
+# 要求一覧（自動生成 / 手で編集しないこと）
+
+## ユーザーストーリー
+
+| ID | として | したい | なぜなら | 状態 | 受入要求 |
+|----|--------|--------|----------|------|----------|
+| US-001 | ワークステーションでコンテナを扱う利用者 | 上流レジストリを識別するパス要素を付けずにイメージを取得したい | 既存の compose ファイルと手元の手順を書き換えずにキャッシュを経由できる | 有効 | REQ-0002, REQ-0003, REQ-0006, REQ-0007, REQ-0054 |
+| US-002 | kubeadm で構築した Kubernetes クラスタの管理者 | containerd のミラー設定だけでキャッシュを経由させたい | マニフェストに書いたイメージ参照を一切変更せずにクラスタ全体へ適用できる | 有効 | REQ-0001, REQ-0006 |
+| US-003 | ホームラボの運用者 | 何がどれだけ保持されているかを画面で確認したい | 設定順序と有効期間を調整する根拠が得られる | 有効 | REQ-0017, REQ-0040, REQ-0041, REQ-0042, REQ-0044 |
+| US-004 | ホームラボの運用者 | 同じイメージを繰り返し取得しても上流レジストリへ問い合わせないでほしい | Docker Hub の要求回数制限と回線帯域に配備を妨げられない | 有効 | REQ-0003, REQ-0004, REQ-0005, REQ-0010, REQ-0011, REQ-0012, REQ-0014, REQ-0015, REQ-0016, REQ-0017 |
+| US-005 | ホームラボの運用者 | 保存領域が上限に達したら古いものから自動で整理してほしい | ディスクを使い切って同居する他のサービスを巻き込んで停止させない | 有効 | REQ-0023, REQ-0025, REQ-0026, REQ-0027 |
+| US-006 | ホームラボの運用者 | 単一の実行ファイルで資源の限られた機器に配備したい | 運用対象の構成要素を増やさずに済む | 有効 | REQ-0050, REQ-0051, REQ-0053, REQ-0055 |
+| US-007 | アクセス制御を管理する運用者 | 非公開イメージが認証を持たない利用者へ配信されないようにしたい | 上流レジストリのアクセス制御を迂回する経路を作らない | 有効 | REQ-0013 |
+
+## 要求
+
+| ID | 種別 | 優先度 | 状態 | 要求文 | 理由 | ストーリー | 検証 |
+|----|------|--------|------|--------|------|------------|------|
+| REQ-0001 | functional | must | 有効 | クライアントが名前空間ヒントを付与して要求を送信した時、システムは名前空間ヒントが示す上流レジストリのみに問い合わせなければならない | containerd はミラー宛の要求に元の上流レジストリを示す名前空間ヒントを付与するため、これを使えば探索を行わずに取得元を確定でき、意図しない上流の応答を返す可能性を排除できるため | US-002 | test:tests/routing.rs::ns_hint_selects_single_upstream |
+| REQ-0002 | functional | must | 有効 | 名前空間ヒントが無くルーティングメモにも記録が無いリポジトリ参照を要求された時、システムは設定された順序で上流レジストリに問い合わせ、最初に成功応答を返した上流の結果をクライアントへ返さなければならない | ワークステーションの Docker Engine は名前空間ヒントを送出せず、上流を識別するパス要素も用いない方針であるため、取得元を特定する手段が順序による探索しか残らないため | US-001 | test:tests/routing.rs::ordered_fallback_returns_first_success |
+| REQ-0003 | functional | must | 有効 | 順序フォールバックによって上流レジストリが確定した時、システムはリポジトリ参照と上流レジストリの対応を記録し、以降の同一リポジトリ参照への要求では探索を行わず記録された上流へ問い合わせなければならない | 要求のたびに全上流へ問い合わせると Docker Hub の要求回数制限を消費し、応答までの時間が上流レジストリの数に比例して延びるため | US-001, US-004 | test:tests/routing.rs::routing_memo_skips_probe_on_second_request |
+| REQ-0004 | functional | should | 有効 | すべての上流レジストリが対象のリポジトリ参照に対して不存在を返した時、システムはその結果を有効期間付きで記録し、有効期間内は上流レジストリへ再問い合わせせずに不存在を返さなければならない | 存在しないイメージへの要求が繰り返されると、そのたびに全上流を探索して要求回数制限を消費するため | US-004 | test:tests/routing.rs::negative_cache_suppresses_reprobe |
+| REQ-0005 | quality | should | 有効 | システムはネガティブキャッシュの既定の有効期間を30分としなければならない | 30分であれば新規に公開されたイメージを取得できない時間が運用上許容でき、かつ不存在の記録が要求回数制限の節約に寄与するため。この長さを許容できるのは、待たずに反映させる操作を UI に用意しているため | US-004 | test:tests/routing.rs::negative_cache_default_ttl_is_30_minutes |
+| REQ-0006 | constraint | must | 有効 | システムはクライアントが指定するイメージ参照に、上流レジストリを識別するための追加のパス要素を要求してはならない | パス要素の付与を求める方式は既に評価して退けており、既存のマニフェストと compose ファイルを書き換えずに導入できることが本プロジェクトの成立条件であるため | US-001, US-002 | test:tests/routing.rs::pull_path_has_no_upstream_prefix |
+| REQ-0007 | functional | must | 有効 | 同一のリポジトリ参照が複数の上流レジストリに存在する時、システムは設定順序が最も先である上流レジストリの応答を返さなければならない | 順序フォールバックでは名前衝突を解決する手掛かりが設定順序しかなく、解決結果が実行のたびに変わると再現性のない配備になるため | US-001 | test:tests/routing.rs::name_collision_resolved_by_configured_order |
+| REQ-0008 | constraint | must | 有効 | システムは docker.io、ghcr.io、quay.io の3つの上流レジストリへの問い合わせに対応しなければならない | 現在の運用で取得しているイメージがこの3つに集中しており、この範囲を満たせば既存の取得経路を置き換えられるため | - | test:tests/routing.rs::all_configured_upstreams_reachable |
+| REQ-0010 | functional | must | 有効 | 上流レジストリから blob を取得した時、システムはその blob をダイジェストを鍵として保存し、以降の同一ダイジェストへの要求に対して上流レジストリへ問い合わせずに応答しなければならない | blob はダイジェストによって内容が一意に定まり変化しないため、一度取得すれば再取得も再検証も不要であり、取得量の大部分を占めるレイヤーをここで削減できるため | US-004 | test:tests/cache.rs::blob_served_from_store_without_upstream_call |
+| REQ-0011 | functional | must | 有効 | クライアントがタグを指定してマニフェストを要求し、かつ保存済みマニフェストの有効期間が経過している時、システムは上流レジストリへ再問い合わせしなければならない | タグは同じ名前のまま指す先が変わりうるため、期限を設けずに保存すると更新されたイメージを取得できなくなるため | US-004 | test:tests/cache.rs::expired_tag_manifest_triggers_revalidation |
+| REQ-0012 | functional | must | 有効 | クライアントがダイジェストを指定してマニフェストを要求した時、システムは保存済みマニフェストが存在すれば有効期間を確認せずに応答しなければならない | ダイジェストによる参照は内容が一意に定まり変化しないため、再検証を行っても結果が変わらず、上流レジストリへの要求を無駄に消費するだけであるため | US-004 | test:tests/cache.rs::digest_manifest_never_revalidated |
+| REQ-0013 | constraint | must | 有効 | 上流レジストリから取得したイメージが認証情報なしでは取得できないものである時、システムはその内容を保存してはならない | 認証を経て取得した内容を保存すると、認証情報を持たない下流の利用者にも配信され、上流レジストリのアクセス制御を迂回する経路になるため | US-007 | test:tests/cache.rs::authenticated_content_is_not_persisted |
+| REQ-0014 | functional | should | 有効 | 上流レジストリへの問い合わせが失敗した時、システムは保存済みの内容が存在すればそれを返し、その応答が再検証されていないことをクライアントへ示さなければならない | 上流レジストリまたは回線の一時的な障害によってクラスタの配備が停止することを避けるため | US-004 | test:tests/cache.rs::stale_content_served_when_upstream_unreachable |
+| REQ-0015 | quality | should | 有効 | システムはタグを指定して取得したマニフェストの既定の有効期間を30分としなければならない | 30分であれば上流レジストリへの要求回数を抑えつつ、更新されたイメージが反映されるまでの遅れが運用上許容できるため。この長さを許容できるのは、待たずに反映させる操作を UI に用意しているため | US-004 | test:tests/cache.rs::tag_manifest_default_ttl_is_30_minutes |
+| REQ-0016 | functional | should | 有効 | 運用者が上流レジストリの認証情報を設定した時、システムは当該上流レジストリへの問い合わせにその認証情報を使用しなければならない | Docker Hub は認証済みの要求に対して要求回数制限を緩和するため、認証情報を用いることで制限に到達しにくくなるため。ここでの認証情報は制限緩和のための手段であり、非公開イメージの保持を許すものではない | US-004 | test:tests/cache.rs::configured_credentials_used_for_upstream_request |
+| REQ-0017 | functional | must | 有効 | 利用者が Web UI から再取得を指示した時、システムは有効期間の残りにかかわらず上流レジストリへ問い合わせ、保存内容を更新しなければならない | 有効期間の既定を30分としたため、更新を直ちに反映させたい場合に待つ以外の手段がなくなり、有効期間を短く設定し直す以外に回避策のない状態になるため | US-003, US-004 | test:tests/ui.rs::force_refresh_bypasses_remaining_ttl |
+| REQ-0020 | constraint | must | 有効 | システムは保存するデータの配置を OCI Image Layout 仕様に準拠させなければならない | 標準仕様に従えば skopeo や crane といった既存の道具で保存内容を直接検査でき、独自形式に閉じ込めて移行できなくなる事態を避けられるため | - | test:tests/storage.rs::layout_conforms_to_oci_image_layout |
+| REQ-0021 | constraint | must | 有効 | 複数の上流レジストリから取得したイメージが同一ダイジェストの blob を含む時、システムはその blob を1つだけ保存しなければならない | 同じベースイメージが複数の上流レジストリに存在することは一般的であり、上流ごとに複製すると保存領域の使用量が上流レジストリの数に比例して増えるため | - | test:tests/storage.rs::identical_blob_stored_once_across_upstreams |
+| REQ-0022 | constraint | must | 有効 | システムは保存するタグの情報を上流レジストリごとに分離して管理しなければならない | 同一のリポジトリ参照が複数の上流レジストリに存在しうるため、タグの情報を混在させると取得元を追跡できなくなり、名前衝突が起きた際にどちらを保持しているか判別できなくなるため | - | test:tests/storage.rs::tag_namespace_is_separated_per_upstream |
+| REQ-0023 | functional | must | 有効 | 保存済みデータの合計サイズが設定された上限に達した時、システムは最終参照時刻が古い blob から順に削除しなければならない | ホームラボの保存領域は有限であり、上限の制御がないとディスクを使い切って同居する他のサービスを巻き込んで停止させるため | US-005 | test:tests/storage.rs::eviction_removes_least_recently_used_blob |
+| REQ-0024 | constraint | must | 有効 | 上流レジストリから blob を取得した時、システムは受信した内容から計算したダイジェストが要求したダイジェストと一致しない場合、その内容を保存せず誤りを返さなければならない | 破損または改竄された内容を保存すると、以降そのキャッシュを参照するすべての配備へ伝播し、発見も困難になるため | - | test:tests/storage.rs::digest_mismatch_rejects_and_does_not_store |
+| REQ-0025 | functional | should | 有効 | マニフェストが削除または置換された時、システムはどのマニフェストからも参照されなくなった blob を削除しなければならない | タグが更新されると古いレイヤーはどこからも参照されなくなるため、回収しなければ保存領域の使用量が単調に増え続けるため | US-005 | test:tests/storage.rs::unreferenced_blob_is_collected |
+| REQ-0026 | quality | should | 有効 | システムは保存領域の使用量の既定の上限を、保存先ファイルシステムの全容量の50パーセントとしなければならない | 配備先のディスク容量は環境ごとに異なり固定容量では初回起動時の上限が定まらないが、全容量に対する割合で定めれば環境を問わず同居する他のサービスの領域を半分残せるため | US-005 | test:tests/storage.rs::default_capacity_is_half_of_filesystem |
+| REQ-0027 | functional | must | 有効 | 運用者が保存領域の上限を設定した時、システムは既定値ではなく設定された値を上限として使用しなければならない | 全容量の半分という既定が大きすぎる配備先と小さすぎる配備先の双方が存在しうるため、運用者が実際のディスク構成に合わせて調整できる必要があるため | US-005 | test:tests/storage.rs::configured_capacity_overrides_default |
+| REQ-0030 | constraint | must | 有効 | システムは OCI Distribution Specification が定める取得系エンドポイントに準拠して応答しなければならない | containerd と Docker Engine はいずれも仕様に基づいて動作するため、仕様から逸脱すると利用者から原因を特定しにくい失敗として観測されるため | - | test:tests/conformance.rs::oci_distribution_spec_pull_suite |
+| REQ-0031 | constraint | must | 有効 | システムは OCI Distribution Specification が定める書き込み系エンドポイントを実装してはならない | 本システムの用途は上流レジストリの内容を取得して保持することに限られ、書き込みを受け付けると保存領域の管理と認可の要件が増えて成立条件そのものが変わるため | - | test:tests/conformance.rs::push_endpoints_are_absent |
+| REQ-0032 | constraint | must | 有効 | システムはマニフェストの応答に Docker-Content-Digest ヘッダを含め、その値を応答本文から計算したダイジェストと一致させなければならない | containerd はこのヘッダを取得内容の検証に用いており、欠落または不一致があると取得が失敗し、その原因が利用者からは判別しにくいため | - | test:tests/conformance.rs::content_digest_header_matches_body |
+| REQ-0033 | constraint | must | 有効 | クライアントが Accept ヘッダで受け入れ可能なメディアタイプを指定した時、システムは指定された範囲に含まれるメディアタイプでマニフェストを返さなければならない | 同じイメージが Docker 形式と OCI 形式の双方で提供されることがあり、クライアントが解釈できない形式を返すと取得が失敗するため | - | test:tests/conformance.rs::manifest_media_type_negotiation |
+| REQ-0034 | constraint | must | 有効 | 要求されたマニフェストがマニフェストリストである時、システムはプラットフォームの選択を行わずマニフェストリストのまま返さなければならない | 対象環境には arm64 の構成と amd64 の構成の双方の利用者がおり、システム側でプラットフォームを選ぶと利用者が必要とする構成を取得できなくなるため | - | test:tests/conformance.rs::manifest_list_passed_through_unmodified |
+| REQ-0035 | constraint | should | 有効 | クライアントが Range ヘッダを指定して blob を要求した時、システムは指定された範囲のみを返さなければならない | containerd は中断した取得の再開に範囲指定を用いるため、対応しなければ大きなレイヤーの取得が中断のたびに最初からやり直しになるため | - | test:tests/conformance.rs::range_request_returns_partial_content |
+| REQ-0040 | functional | must | 有効 | 利用者が Web UI を開いた時、システムは保存済みのリポジトリ参照とタグの一覧を表示しなければならない | 何が保持されているかを確認する手段が存在しないことが、既存のプロキシ実装を採用しなかった主要な理由であるため | US-003 | test:tests/ui.rs::catalog_lists_stored_repositories |
+| REQ-0041 | functional | must | 有効 | Web UI が保存済みのイメージを表示する時、システムはその取得元である上流レジストリを併せて表示しなければならない | 順序フォールバックでは取得元が設定順序に依存して決まるため、意図しない上流レジストリから取得していないかを運用者が確認できる必要があるため | US-003 | test:tests/ui.rs::image_entry_shows_source_upstream |
+| REQ-0042 | functional | should | 有効 | 利用者が Web UI を開いた時、システムはキャッシュの命中回数と不命中回数、および保存領域の使用量を表示しなければならない | キャッシュが効いているかを判断する材料がなければ、設定順序と有効期間を調整する根拠が得られないため | US-003 | test:tests/ui.rs::stats_endpoint_reports_hit_and_miss |
+| REQ-0043 | constraint | must | 有効 | システムは Web UI の静的資産を実行ファイルに埋め込み、追加のファイル配置を伴わずに配信しなければならない | 単一ファイルでの配布を成立条件としており、UI を別配置にすると配備手順が増えて既存の選択肢に対する優位が失われるため | - | test:tests/ui.rs::assets_served_from_embedded_bundle |
+| REQ-0044 | functional | should | 有効 | 監視系がメトリクスの取得を要求した時、システムは Prometheus 形式でキャッシュ統計を返さなければならない | 既に運用している VictoriaMetrics と Grafana による監視基盤へ取り込み、他の指標と並べて確認できるようにするため | US-003 | test:tests/ui.rs::metrics_endpoint_exposes_prometheus_format |
+| REQ-0050 | constraint | must | 有効 | システムは外部のデータベースと追加の常駐プロセスを必要とせず、単一の実行ファイルで動作しなければならない | 既存の選択肢を退けた最大の理由が構成要素の多さであり、単一の実行ファイルで完結することが本プロジェクトの存在意義そのものであるため | US-006 | review:配布物が単一実行ファイルであることの確認手順 |
+| REQ-0051 | constraint | must | 有効 | システムは blob を上流レジストリから取得してクライアントへ中継する時、その blob の全体を主記憶上に保持してはならない | レイヤーは1つで数百メガバイトに達することがあり、全体を主記憶に保持すると同時に処理する要求の数に比例して主記憶を使い切るため | US-006 | test:tests/platform.rs::large_blob_relay_does_not_buffer_whole_body |
+| REQ-0052 | quality | should | 置換済 | システムは定常状態における常駐メモリの使用量を定められた値以下に保たなければならない | 配備先の機器と同居するワークロードによって許容量が変わるため、上限値を決めなければ達成の可否を判定できないため | US-006 | - |
+| REQ-0053 | constraint | must | 有効 | システムは linux/arm64 と linux/amd64 の双方で動作する実行ファイルを提供しなければならない | 対象環境に Raspberry Pi による arm64 の構成と amd64 の構成が併存しており、いずれか一方のみでは配備先が限られるため | US-006 | review:双方のアーキテクチャ向け成果物が生成されることの確認手順 |
+| REQ-0054 | functional | must | 有効 | 運用者が証明書と秘密鍵を設定した時、システムは TLS による接続を受け付けなければならない | Docker Engine は既定で TLS による接続を要求するため、TLS を用いない場合はすべてのクライアントに個別の設定変更が必要になるため | US-001 | test:tests/platform.rs::tls_listener_accepts_configured_certificate |
+| REQ-0055 | constraint | must | 有効 | システムは常駐メモリの使用量に自身で上限を設けず、実行環境が課す制限に従って動作しなければならない | メモリの上限は OS の制御機構またはコンテナ実行環境の設定で課すのが配備先ごとの実情に合っており、システム側が独自の上限を持つと二重の制御になって障害時の原因の切り分けを難しくするため | US-006 | review:独自のメモリ上限機構を持たないことを確認するコードレビュー手順 |
+
+## 廃止・置換された要求（墓標）
+
+| ID | 要求文 | 状態 | 廃止理由 | 置換先 |
+|----|--------|------|----------|--------|
+| REQ-0052 | システムは定常状態における常駐メモリの使用量を定められた値以下に保たなければならない | 置換済 | システム自身が常駐メモリの上限を持つ方針を取りやめ、実行環境が課す制限に委ねる方針へ転換したため。REQ-0055 に置き換えた | REQ-0055 |

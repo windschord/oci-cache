@@ -1,0 +1,150 @@
+# ストレージ領域の要求
+# ディスク上の配置、重複排除、容量管理、整合性に関する要求
+
+requirements:
+  - id: REQ-0020
+    title: OCI Image Layout への準拠
+    statement: システムは保存するデータの配置を OCI Image Layout 仕様に準拠させなければならない
+    type: constraint
+    status: active
+    priority: must
+    terms: [OCI Image Layout]
+    tags: [storage]
+    rationale:
+      why: 標準仕様に従えば skopeo や crane といった既存の道具で保存内容を直接検査でき、独自形式に閉じ込めて移行できなくなる事態を避けられるため
+      source: 2026-08-25 設計相談。zot が同仕様のみを採用している事実を確認したうえでの判断
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - 独自のディレクトリ構成による保存
+        - nginx の proxy_cache と同様のハッシュ名による不透明な保存
+    asserts:
+      - key: storage.layout
+        value: oci_image_layout
+    verification:
+      - kind: test
+        ref: tests/storage.rs::layout_conforms_to_oci_image_layout
+
+  - id: REQ-0021
+    title: blob の重複排除
+    statement: 複数の上流レジストリから取得したイメージが同一ダイジェストの blob を含む時、システムはその blob を1つだけ保存しなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0020]
+    terms: [blob, ダイジェスト, 上流レジストリ]
+    tags: [storage]
+    rationale:
+      why: 同じベースイメージが複数の上流レジストリに存在することは一般的であり、上流ごとに複製すると保存領域の使用量が上流レジストリの数に比例して増えるため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/storage.rs::identical_blob_stored_once_across_upstreams
+
+  - id: REQ-0022
+    title: タグ情報の上流別分離
+    statement: システムは保存するタグの情報を上流レジストリごとに分離して管理しなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0007, REQ-0021]
+    terms: [上流レジストリ, リポジトリ参照]
+    tags: [storage]
+    rationale:
+      why: 同一のリポジトリ参照が複数の上流レジストリに存在しうるため、タグの情報を混在させると取得元を追跡できなくなり、名前衝突が起きた際にどちらを保持しているか判別できなくなるため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/storage.rs::tag_namespace_is_separated_per_upstream
+
+  - id: REQ-0023
+    title: 保存領域の上限による退避
+    statement: 保存済みデータの合計サイズが設定された上限に達した時、システムは最終参照時刻が古い blob から順に削除しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-005]
+    depends_on: [REQ-0021]
+    terms: [blob]
+    tags: [storage]
+    rationale:
+      why: ホームラボの保存領域は有限であり、上限の制御がないとディスクを使い切って同居する他のサービスを巻き込んで停止させるため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/storage.rs::eviction_removes_least_recently_used_blob
+
+  - id: REQ-0024
+    title: 取得内容の整合性検証
+    statement: 上流レジストリから blob を取得した時、システムは受信した内容から計算したダイジェストが要求したダイジェストと一致しない場合、その内容を保存せず誤りを返さなければならない
+    type: constraint
+    status: active
+    priority: must
+    terms: [blob, ダイジェスト, 上流レジストリ]
+    tags: [storage, security]
+    rationale:
+      why: 破損または改竄された内容を保存すると、以降そのキャッシュを参照するすべての配備へ伝播し、発見も困難になるため
+      source: 2026-08-25 設計相談。OCI Distribution Specification が定める検証手順に基づく
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/storage.rs::digest_mismatch_rejects_and_does_not_store
+
+  - id: REQ-0025
+    title: 参照されない blob の回収
+    statement: マニフェストが削除または置換された時、システムはどのマニフェストからも参照されなくなった blob を削除しなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-005]
+    depends_on: [REQ-0021]
+    terms: [blob, マニフェスト]
+    tags: [storage]
+    rationale:
+      why: タグが更新されると古いレイヤーはどこからも参照されなくなるため、回収しなければ保存領域の使用量が単調に増え続けるため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/storage.rs::unreferenced_blob_is_collected
+
+  - id: REQ-0026
+    title: 保存領域の既定上限
+    statement: システムは保存領域の使用量の既定の上限を、保存先ファイルシステムの全容量の50パーセントとしなければならない
+    type: quality
+    status: active
+    priority: should
+    stories: [US-005]
+    depends_on: [REQ-0023]
+    tags: [storage]
+    rationale:
+      why: 配備先のディスク容量は環境ごとに異なり固定容量では初回起動時の上限が定まらないが、全容量に対する割合で定めれば環境を問わず同居する他のサービスの領域を半分残せるため
+      source: 2026-08-25 tsk さんの決定
+      decided_at: 2026-08-25
+    measures:
+      - subject: storage.capacity.default_ratio
+        op: "=="
+        value: 50
+        unit: percent
+    verification:
+      - kind: test
+        ref: tests/storage.rs::default_capacity_is_half_of_filesystem
+
+  - id: REQ-0027
+    title: 保存領域上限の明示指定
+    statement: 運用者が保存領域の上限を設定した時、システムは既定値ではなく設定された値を上限として使用しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-005]
+    depends_on: [REQ-0026]
+    tags: [storage]
+    rationale:
+      why: 全容量の半分という既定が大きすぎる配備先と小さすぎる配備先の双方が存在しうるため、運用者が実際のディスク構成に合わせて調整できる必要があるため
+      source: 2026-08-25 tsk さんの指示
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/storage.rs::configured_capacity_overrides_default

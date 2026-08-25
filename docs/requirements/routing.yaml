@@ -1,0 +1,171 @@
+# ルーティング領域の要求
+# 上流レジストリの決定方式に関する要求をまとめる
+
+requirements:
+  - id: REQ-0001
+    title: 名前空間ヒントの優先
+    statement: クライアントが名前空間ヒントを付与して要求を送信した時、システムは名前空間ヒントが示す上流レジストリのみに問い合わせなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-002]
+    terms: [名前空間ヒント, 上流レジストリ]
+    tags: [routing]
+    rationale:
+      why: containerd はミラー宛の要求に元の上流レジストリを示す名前空間ヒントを付与するため、これを使えば探索を行わずに取得元を確定でき、意図しない上流の応答を返す可能性を排除できるため
+      source: 2026-08-25 設計相談。containerd の docs/hosts.md に記載された仕様に基づく
+      decided_at: 2026-08-25
+    asserts:
+      - key: routing.ns_hint.precedence
+        value: highest
+    verification:
+      - kind: test
+        ref: tests/routing.rs::ns_hint_selects_single_upstream
+
+  - id: REQ-0002
+    title: 順序フォールバックによる上流決定
+    statement: 名前空間ヒントが無くルーティングメモにも記録が無いリポジトリ参照を要求された時、システムは設定された順序で上流レジストリに問い合わせ、最初に成功応答を返した上流の結果をクライアントへ返さなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-001]
+    terms: [順序フォールバック, ルーティングメモ, リポジトリ参照, 上流レジストリ, 名前空間ヒント]
+    tags: [routing]
+    rationale:
+      why: ワークステーションの Docker Engine は名前空間ヒントを送出せず、上流を識別するパス要素も用いない方針であるため、取得元を特定する手段が順序による探索しか残らないため
+      source: 2026-08-25 tsk さんの選択。ワークステーションからも取得する運用を前提とする
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - イメージ参照に上流を識別するパス要素を付与する方式
+        - 上流レジストリごとに待ち受けポートを分ける方式
+    verification:
+      - kind: test
+        ref: tests/routing.rs::ordered_fallback_returns_first_success
+
+  - id: REQ-0003
+    title: ルーティングメモによる探索の省略
+    statement: 順序フォールバックによって上流レジストリが確定した時、システムはリポジトリ参照と上流レジストリの対応を記録し、以降の同一リポジトリ参照への要求では探索を行わず記録された上流へ問い合わせなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-001, US-004]
+    depends_on: [REQ-0002]
+    terms: [ルーティングメモ, 順序フォールバック, リポジトリ参照, 上流レジストリ]
+    tags: [routing]
+    rationale:
+      why: 要求のたびに全上流へ問い合わせると Docker Hub の要求回数制限を消費し、応答までの時間が上流レジストリの数に比例して延びるため
+      source: 2026-08-25 設計相談。Nexus の group repository が同種の記録を持つ前提での検討
+      decided_at: 2026-08-25
+    measures:
+      - subject: routing.fallback.repeat_probe_count
+        op: "=="
+        value: 0
+        unit: count
+    verification:
+      - kind: test
+        ref: tests/routing.rs::routing_memo_skips_probe_on_second_request
+
+  - id: REQ-0004
+    title: 不存在結果の記録
+    statement: すべての上流レジストリが対象のリポジトリ参照に対して不存在を返した時、システムはその結果を有効期間付きで記録し、有効期間内は上流レジストリへ再問い合わせせずに不存在を返さなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-004]
+    depends_on: [REQ-0002]
+    terms: [ネガティブキャッシュ, 上流レジストリ, リポジトリ参照]
+    tags: [routing]
+    rationale:
+      why: 存在しないイメージへの要求が繰り返されると、そのたびに全上流を探索して要求回数制限を消費するため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/routing.rs::negative_cache_suppresses_reprobe
+
+  - id: REQ-0005
+    title: ネガティブキャッシュの既定有効期間
+    statement: システムはネガティブキャッシュの既定の有効期間を30分としなければならない
+    type: quality
+    status: active
+    priority: should
+    stories: [US-004]
+    depends_on: [REQ-0004, REQ-0017]
+    terms: [ネガティブキャッシュ]
+    tags: [routing]
+    rationale:
+      why: 30分であれば新規に公開されたイメージを取得できない時間が運用上許容でき、かつ不存在の記録が要求回数制限の節約に寄与するため。この長さを許容できるのは、待たずに反映させる操作を UI に用意しているため
+      source: 2026-08-25 tsk さんの決定
+      decided_at: 2026-08-25
+    measures:
+      - subject: routing.negative_cache.ttl
+        op: "=="
+        value: 30
+        unit: min
+    verification:
+      - kind: test
+        ref: tests/routing.rs::negative_cache_default_ttl_is_30_minutes
+
+  - id: REQ-0006
+    title: 上流を識別するパス要素の非要求
+    statement: システムはクライアントが指定するイメージ参照に、上流レジストリを識別するための追加のパス要素を要求してはならない
+    type: constraint
+    status: active
+    priority: must
+    stories: [US-001, US-002]
+    terms: [上流レジストリ]
+    tags: [routing]
+    rationale:
+      why: パス要素の付与を求める方式は既に評価して退けており、既存のマニフェストと compose ファイルを書き換えずに導入できることが本プロジェクトの成立条件であるため
+      source: 2026-08-25 tsk さんの判断。zot の評価時に明確化された
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - zot の sync 拡張が用いる destination プレフィックス方式
+        - Harbor の proxy cache が用いるプロジェクト名を含む方式
+    forbids:
+      - key: routing.path.upstream_prefix
+        value: required
+    verification:
+      - kind: test
+        ref: tests/routing.rs::pull_path_has_no_upstream_prefix
+
+  - id: REQ-0007
+    title: 名前衝突時の決定性
+    statement: 同一のリポジトリ参照が複数の上流レジストリに存在する時、システムは設定順序が最も先である上流レジストリの応答を返さなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-001]
+    depends_on: [REQ-0002]
+    terms: [リポジトリ参照, 上流レジストリ, 順序フォールバック]
+    tags: [routing]
+    rationale:
+      why: 順序フォールバックでは名前衝突を解決する手掛かりが設定順序しかなく、解決結果が実行のたびに変わると再現性のない配備になるため
+      source: 2026-08-25 設計相談。Nexus の group repository が持つ制約と同種のもの
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/routing.rs::name_collision_resolved_by_configured_order
+
+  - id: REQ-0008
+    title: 初期対応する上流レジストリ
+    statement: システムは docker.io、ghcr.io、quay.io の3つの上流レジストリへの問い合わせに対応しなければならない
+    type: constraint
+    status: active
+    priority: must
+    terms: [上流レジストリ]
+    tags: [routing]
+    rationale:
+      why: 現在の運用で取得しているイメージがこの3つに集中しており、この範囲を満たせば既存の取得経路を置き換えられるため
+      source: 2026-08-25 tsk さんの選択
+      decided_at: 2026-08-25
+    asserts:
+      - key: routing.upstream.initial
+        value: docker.io
+      - key: routing.upstream.initial
+        value: ghcr.io
+      - key: routing.upstream.initial
+        value: quay.io
+    verification:
+      - kind: test
+        ref: tests/routing.rs::all_configured_upstreams_reachable
