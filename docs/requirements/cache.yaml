@@ -176,7 +176,8 @@ requirements:
     status: active
     priority: must
     stories: [US-007]
-    depends_on: [REQ-0013, REQ-0016]
+    refines: [REQ-0013]
+    depends_on: [REQ-0016]
     terms: [公開イメージ, 非公開イメージ, 上流レジストリ]
     tags: [cache, security]
     rationale:

@@ -8,6 +8,7 @@ requirements:
     type: constraint
     status: active
     priority: must
+    terms: [取得系エンドポイント]
     tags: [api, conformance]
     rationale:
       why: containerd と Docker Engine はいずれも仕様に基づいて動作するため、仕様から逸脱すると利用者から原因を特定しにくい失敗として観測されるため
@@ -23,6 +24,7 @@ requirements:
     type: constraint
     status: active
     priority: must
+    terms: [書き込み系エンドポイント]
     tags: [api, scope]
     rationale:
       why: 本システムの用途は上流レジストリの内容を取得して保持することに限られ、書き込みを受け付けると保存領域の管理と認可の要件が増えて成立条件そのものが変わるため
@@ -112,6 +114,7 @@ requirements:
     status: active
     priority: must
     depends_on: [REQ-0031]
+    terms: [書き込み系エンドポイント]
     tags: [api, conformance]
     rationale:
       why: REQ-0031 は実装しないことだけを定めており応答が規定されていないため、経路が存在しないことによる不存在の応答と区別できず、push を試みた利用者にはイメージが存在しないという誤った手掛かりだけが返るため

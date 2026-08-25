@@ -81,7 +81,7 @@ python3 scripts/reqctl.py stats               # 件数サマリ
 | [generated/traceability.md](docs/requirements/generated/traceability.md) | ストーリー → 要求 → 検証手段 |
 | [generated/graph.md](docs/requirements/generated/graph.md) | 要求間の関係グラフ |
 
-現状: 要求 49 件（active 48 / superseded 1）、ストーリー 7 件、用語 14 件。
+現状: 要求 49 件（active 48 / superseded 1）、ストーリー 7 件、用語 16 件。
 
 主な既定値:
 
