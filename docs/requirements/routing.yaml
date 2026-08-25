@@ -169,3 +169,58 @@ requirements:
     verification:
       - kind: test
         ref: tests/routing.rs::all_configured_upstreams_reachable
+
+  - id: REQ-0009
+    title: 上流レジストリと問い合わせ順序の設定
+    statement: 運用者が上流レジストリの識別子を順序付きで設定した時、システムは設定された順序を上流レジストリへの問い合わせ順序として使用しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-001, US-003]
+    depends_on: [REQ-0008]
+    terms: [上流レジストリ, 順序フォールバック]
+    tags: [routing]
+    rationale:
+      why: REQ-0002 と REQ-0007 はいずれも「設定された順序」を前提に振る舞いを定めているが、その順序を運用者が与える手段を定めた要求が存在せず、順序の出所が要求の集合の外にあるため。US-003 が期待する設定順序の調整もこの要求がなければ根拠を持たない
+      source: 2026-08-25 要求レビュー。REQ-0002 / REQ-0007 / REQ-0008 の前提として抽出
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/routing.rs::configured_upstream_order_is_used
+
+  # 0001〜0009 を使い切ったため、以降のルーティング領域の要求は 0056 以降を用いる
+  - id: REQ-0056
+    title: ルーティングメモの破棄と再解決
+    statement: 記録された上流レジストリがリポジトリ参照に対して不存在を返した時、システムはその記録を破棄して順序フォールバックを再実行しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-001]
+    depends_on: [REQ-0003]
+    terms: [ルーティングメモ, 順序フォールバック, リポジトリ参照, 上流レジストリ]
+    tags: [routing]
+    rationale:
+      why: REQ-0003 の記録には破棄の契機が定められていないため、上流レジストリからイメージが削除された場合や設定順序を変更した場合に、記録された上流へ問い合わせ続けて取得できない状態が恒久的に続くため
+      source: 2026-08-25 要求レビュー。REQ-0003 の記録が単調増加で失効しない点を指摘
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/routing.rs::routing_memo_discarded_when_recorded_upstream_misses
+
+  - id: REQ-0057
+    title: 応答しない上流レジストリの打ち切り
+    statement: 上流レジストリへの問い合わせが設定された待ち時間を超えて応答しない時、システムはその上流レジストリを失敗として扱い、順序フォールバックを次の上流レジストリへ進めなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-001]
+    depends_on: [REQ-0002]
+    terms: [上流レジストリ, 順序フォールバック]
+    tags: [routing]
+    rationale:
+      why: 順序フォールバックは先頭の上流レジストリの応答を待って次へ進むため、打ち切りの規定がないと応答しない上流が1つあるだけでクライアントの取得がその障害時間だけ滞留し、後続の上流に内容があっても届かないため
+      source: 2026-08-25 要求レビュー。REQ-0002 の探索が非有界である点を指摘
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/routing.rs::unresponsive_upstream_advances_to_next

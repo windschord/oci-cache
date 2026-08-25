@@ -148,3 +148,38 @@ requirements:
     verification:
       - kind: test
         ref: tests/storage.rs::configured_capacity_overrides_default
+
+  - id: REQ-0028
+    title: 退避された blob の再取得
+    statement: 退避によって削除された blob が以降の要求で必要になった時、システムは記録された上流レジストリからその blob を再取得しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-005]
+    depends_on: [REQ-0023, REQ-0003]
+    terms: [blob, 上流レジストリ]
+    tags: [storage]
+    rationale:
+      why: REQ-0023 は最終参照時刻の古い blob を削除するが、その blob を参照するマニフェストは保存されたまま残るため、再取得の規定がなければ UI が保持済みとして示すイメージの取得が失敗し、退避が観測される形で壊れるため
+      source: 2026-08-25 要求レビュー。REQ-0023 の退避後にマニフェストと blob の整合が崩れる点を指摘
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/storage.rs::evicted_blob_is_refetched_on_demand
+
+  - id: REQ-0029
+    title: マニフェストの整合性検証
+    statement: ダイジェストを指定してマニフェストを上流レジストリから取得した時、システムは受信した内容から計算したダイジェストが要求したダイジェストと一致しない場合、その内容を保存せず誤りを返さなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0024]
+    terms: [マニフェスト, ダイジェスト, 上流レジストリ]
+    tags: [storage, security]
+    rationale:
+      why: REQ-0024 の検証対象は blob に限られており、マニフェストは検証されないまま保存されると REQ-0012 によって再検証されずに保持され続け、誤った参照先が以降のすべての取得へ伝播するため
+      source: 2026-08-25 要求レビュー。REQ-0024 の対象範囲が blob のみである点を指摘
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/storage.rs::manifest_digest_mismatch_rejects_and_does_not_store

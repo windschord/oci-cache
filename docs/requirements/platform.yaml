@@ -73,6 +73,22 @@ requirements:
       - kind: review
         ref: 双方のアーキテクチャ向け成果物が生成されることの確認手順
 
+  - id: REQ-0054
+    title: TLS 接続の受け入れ
+    statement: 運用者が証明書と秘密鍵を設定した時、システムは TLS による接続を受け付けなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-001]
+    tags: [platform, security]
+    rationale:
+      why: Docker Engine は既定で TLS による接続を要求するため、TLS を用いない場合はすべてのクライアントに個別の設定変更が必要になるため
+      source: 2026-08-25 設計相談。tsk さんが acme.sh と Cloud DNS による証明書管理の仕組みを既に運用している前提
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/platform.rs::tls_listener_accepts_configured_certificate
+
   - id: REQ-0055
     title: 常駐メモリ上限の実行環境への委譲
     statement: システムは常駐メモリの使用量に自身で上限を設けず、実行環境が課す制限に従って動作しなければならない
@@ -95,19 +111,3 @@ requirements:
     verification:
       - kind: review
         ref: 独自のメモリ上限機構を持たないことを確認するコードレビュー手順
-
-  - id: REQ-0054
-    title: TLS 接続の受け入れ
-    statement: 運用者が証明書と秘密鍵を設定した時、システムは TLS による接続を受け付けなければならない
-    type: functional
-    status: active
-    priority: must
-    stories: [US-001]
-    tags: [platform, security]
-    rationale:
-      why: Docker Engine は既定で TLS による接続を要求するため、TLS を用いない場合はすべてのクライアントに個別の設定変更が必要になるため
-      source: 2026-08-25 設計相談。tsk さんが acme.sh と Cloud DNS による証明書管理の仕組みを既に運用している前提
-      decided_at: 2026-08-25
-    verification:
-      - kind: test
-        ref: tests/platform.rs::tls_listener_accepts_configured_certificate

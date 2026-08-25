@@ -104,3 +104,19 @@ requirements:
     verification:
       - kind: test
         ref: tests/conformance.rs::range_request_returns_partial_content
+
+  - id: REQ-0036
+    title: 書き込み系エンドポイントへの応答
+    statement: クライアントが書き込み系エンドポイントへ要求を送信した時、システムは要求が許可されていないことを示す応答を返さなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0031]
+    tags: [api, conformance]
+    rationale:
+      why: REQ-0031 は実装しないことだけを定めており応答が規定されていないため、経路が存在しないことによる不存在の応答と区別できず、push を試みた利用者にはイメージが存在しないという誤った手掛かりだけが返るため
+      source: 2026-08-25 要求レビュー。distribution の読み取り専用モードが同じ状況で 405 を返す前例に基づく
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::push_request_is_rejected_as_not_allowed
