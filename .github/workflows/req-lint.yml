@@ -30,10 +30,16 @@ jobs:
 
       # generated/ は手で編集しない決まりなので、再生成して差分が出るなら
       # YAML の変更が生成物へ反映されていない
+      # git diff では追跡されていない生成物を見落とすため、status で見る
       - name: generated/ の再生成漏れ
         run: |
           python3 scripts/reqctl.py generate
-          git diff --exit-code -- docs/requirements/generated
+          if [ -n "$(git status --porcelain -- docs/requirements/generated)" ]; then
+            echo "generated/ が YAML と一致していません。reqctl.py generate の結果をコミットしてください。" >&2
+            git status --short -- docs/requirements/generated
+            git diff -- docs/requirements/generated
+            exit 1
+          fi
 
   lint:
     name: Rust の整形と静的検査
