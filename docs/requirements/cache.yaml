@@ -1,0 +1,190 @@
+# キャッシュ領域の要求
+# 何を保持し、いつ再検証し、何を保持しないかに関する要求
+
+requirements:
+  - id: REQ-0010
+    title: blob の永続保持
+    statement: 上流レジストリから blob を取得した時、システムはその blob をダイジェストを鍵として保存し、以降の同一ダイジェストへの要求に対して上流レジストリへ問い合わせずに応答しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-004]
+    terms: [blob, ダイジェスト, 上流レジストリ]
+    tags: [cache]
+    rationale:
+      why: blob はダイジェストによって内容が一意に定まり変化しないため、一度取得すれば再取得も再検証も不要であり、取得量の大部分を占めるレイヤーをここで削減できるため
+      source: 2026-08-25 設計相談。OCI Image Specification のコンテンツアドレス方式に基づく
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/cache.rs::blob_served_from_store_without_upstream_call
+
+  - id: REQ-0011
+    title: タグ参照マニフェストの再検証
+    statement: クライアントがタグを指定してマニフェストを要求し、かつ保存済みマニフェストの有効期間が経過している時、システムは上流レジストリへ再問い合わせしなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-004]
+    terms: [マニフェスト, 上流レジストリ]
+    tags: [cache]
+    rationale:
+      why: タグは同じ名前のまま指す先が変わりうるため、期限を設けずに保存すると更新されたイメージを取得できなくなるため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/cache.rs::expired_tag_manifest_triggers_revalidation
+
+  - id: REQ-0012
+    title: ダイジェスト参照マニフェストの無期限保持
+    statement: クライアントがダイジェストを指定してマニフェストを要求した時、システムは保存済みマニフェストが存在すれば有効期間を確認せずに応答しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-004]
+    terms: [マニフェスト, ダイジェスト]
+    tags: [cache]
+    rationale:
+      why: ダイジェストによる参照は内容が一意に定まり変化しないため、再検証を行っても結果が変わらず、上流レジストリへの要求を無駄に消費するだけであるため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/cache.rs::digest_manifest_never_revalidated
+
+  - id: REQ-0013
+    title: 非公開イメージの非保持
+    statement: 上流レジストリから取得したイメージが認証情報なしでは取得できないものである時、システムはその内容を保存してはならない
+    type: constraint
+    status: active
+    priority: must
+    stories: [US-007]
+    terms: [非公開イメージ, 上流レジストリ]
+    tags: [cache, security]
+    rationale:
+      why: 認証を経て取得した内容を保存すると、認証情報を持たない下流の利用者にも配信され、上流レジストリのアクセス制御を迂回する経路になるため
+      source: rpardini/docker-registry-proxy に既知の制限として記載されている挙動を避ける判断。2026-08-25 tsk さんが方針を選択
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - 下流にも認証を要求して非公開イメージも保持する方式
+        - 認証の有無を区別せず保持する方式
+    asserts:
+      - key: cache.scope
+        value: public_only
+    verification:
+      - kind: test
+        ref: tests/cache.rs::authenticated_content_is_not_persisted
+
+  - id: REQ-0014
+    title: 上流障害時の保持内容による応答
+    statement: 上流レジストリへの問い合わせが失敗した時、システムは保存済みの内容が存在すればそれを返し、その応答が再検証されていないことをクライアントへ示さなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-004]
+    terms: [上流レジストリ]
+    tags: [cache]
+    rationale:
+      why: 上流レジストリまたは回線の一時的な障害によってクラスタの配備が停止することを避けるため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/cache.rs::stale_content_served_when_upstream_unreachable
+
+  - id: REQ-0015
+    title: タグ参照マニフェストの既定有効期間
+    statement: システムはタグを指定して取得したマニフェストの既定の有効期間を30分としなければならない
+    type: quality
+    status: active
+    priority: should
+    stories: [US-004]
+    depends_on: [REQ-0011, REQ-0017]
+    terms: [マニフェスト]
+    tags: [cache]
+    rationale:
+      why: 30分であれば上流レジストリへの要求回数を抑えつつ、更新されたイメージが反映されるまでの遅れが運用上許容できるため。この長さを許容できるのは、待たずに反映させる操作を UI に用意しているため
+      source: 2026-08-25 tsk さんの決定
+      decided_at: 2026-08-25
+    measures:
+      - subject: cache.tag_manifest.ttl
+        op: "=="
+        value: 30
+        unit: min
+    verification:
+      - kind: test
+        ref: tests/cache.rs::tag_manifest_default_ttl_is_30_minutes
+
+  - id: REQ-0016
+    title: 上流認証情報の利用
+    statement: 運用者が上流レジストリの認証情報を設定した時、システムは当該上流レジストリへの問い合わせにその認証情報を使用しなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-004]
+    depends_on: [REQ-0013]
+    terms: [上流レジストリ, 公開イメージ]
+    tags: [cache]
+    rationale:
+      why: Docker Hub は認証済みの要求に対して要求回数制限を緩和するため、認証情報を用いることで制限に到達しにくくなるため。ここでの認証情報は制限緩和のための手段であり、非公開イメージの保持を許すものではない
+      source: 2026-08-25 設計相談。Docker Hub の要求回数制限の仕様に基づく
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/cache.rs::configured_credentials_used_for_upstream_request
+
+  - id: REQ-0017
+    title: 保存内容の強制再取得
+    statement: 利用者が Web UI から再取得を指示した時、システムは有効期間の残りにかかわらず上流レジストリへ問い合わせ、保存内容を更新しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-003, US-004]
+    terms: [上流レジストリ]
+    tags: [cache, ui]
+    rationale:
+      why: 有効期間の既定を30分としたため、更新を直ちに反映させたい場合に待つ以外の手段がなくなり、有効期間を短く設定し直す以外に回避策のない状態になるため
+      source: 2026-08-25 tsk さんの指示
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/ui.rs::force_refresh_bypasses_remaining_ttl
+
+  - id: REQ-0018
+    title: 有効期間の明示指定
+    statement: 運用者がタグ参照マニフェストまたはネガティブキャッシュの有効期間を設定した時、システムは既定値ではなく設定された値を有効期間として使用しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-003, US-004]
+    depends_on: [REQ-0005, REQ-0015]
+    terms: [マニフェスト, ネガティブキャッシュ]
+    tags: [cache]
+    rationale:
+      why: US-003 は運用者が有効期間を調整することを前提にしているが、既定値を定める REQ-0015 と REQ-0005 だけでは変更手段が存在せず、保存領域の上限が REQ-0027 で上書きできるのに対して有効期間には同じ調整余地がないままになるため
+      source: 2026-08-25 要求レビュー。REQ-0027 との非対称として抽出
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/cache.rs::configured_ttl_overrides_default
+
+  - id: REQ-0019
+    title: 保存可否の判定基準
+    statement: システムは認証情報を用いない問い合わせで取得できることを確認できたイメージに限り、その内容を保存しなければならない
+    type: constraint
+    status: active
+    priority: must
+    stories: [US-007]
+    depends_on: [REQ-0013, REQ-0016]
+    terms: [公開イメージ, 非公開イメージ, 上流レジストリ]
+    tags: [cache, security]
+    rationale:
+      why: REQ-0016 により上流レジストリへの問い合わせには認証情報が用いられるため、取得が成功した事実だけでは非公開イメージと公開イメージを区別できず、判定基準を定めなければ REQ-0013 は検証も実装もできない規定にとどまるため
+      source: 2026-08-25 要求レビュー。REQ-0013 と REQ-0016 の間に判定手段が欠けている点を指摘
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - 上流レジストリが返す応答符号のみで非公開と判断する方式
+    verification:
+      - kind: test
+        ref: tests/cache.rs::persistence_requires_anonymous_pull_success

@@ -1,0 +1,125 @@
+# API 領域の要求
+# OCI Distribution Specification への準拠に関する要求
+
+requirements:
+  - id: REQ-0030
+    title: 取得系エンドポイントの仕様準拠
+    statement: システムは OCI Distribution Specification が定める取得系エンドポイントに準拠して応答しなければならない
+    type: constraint
+    status: active
+    priority: must
+    terms: [取得系エンドポイント]
+    tags: [api, conformance]
+    rationale:
+      why: containerd と Docker Engine はいずれも仕様に基づいて動作するため、仕様から逸脱すると利用者から原因を特定しにくい失敗として観測されるため
+      source: 2026-08-25 設計相談。OCI distribution-spec の conformance テストスイートを検証手段として用いる前提
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::oci_distribution_spec_pull_suite
+
+  - id: REQ-0031
+    title: 書き込み系エンドポイントの非実装
+    statement: システムは OCI Distribution Specification が定める書き込み系エンドポイントを実装してはならない
+    type: constraint
+    status: active
+    priority: must
+    terms: [書き込み系エンドポイント]
+    tags: [api, scope]
+    rationale:
+      why: 本システムの用途は上流レジストリの内容を取得して保持することに限られ、書き込みを受け付けると保存領域の管理と認可の要件が増えて成立条件そのものが変わるため
+      source: 2026-08-25 設計相談。実装範囲を取得系に絞る判断
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - 書き込みも受け付けて自作イメージの保管を兼ねる方式
+    forbids:
+      - key: api.push
+        value: implemented
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::push_endpoints_are_absent
+
+  - id: REQ-0032
+    title: 内容ダイジェストヘッダの付与
+    statement: システムはマニフェストの応答に Docker-Content-Digest ヘッダを含め、その値を応答本文から計算したダイジェストと一致させなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0030]
+    terms: [マニフェスト, ダイジェスト]
+    tags: [api, conformance]
+    rationale:
+      why: containerd はこのヘッダを取得内容の検証に用いており、欠落または不一致があると取得が失敗し、その原因が利用者からは判別しにくいため
+      source: 2026-08-25 設計相談。フルスクラッチ実装で誤りやすい箇所として特定された
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::content_digest_header_matches_body
+
+  - id: REQ-0033
+    title: メディアタイプのネゴシエーション
+    statement: クライアントが Accept ヘッダで受け入れ可能なメディアタイプを指定した時、システムは指定された範囲に含まれるメディアタイプでマニフェストを返さなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0030]
+    terms: [マニフェスト, マニフェストリスト]
+    tags: [api, conformance]
+    rationale:
+      why: 同じイメージが Docker 形式と OCI 形式の双方で提供されることがあり、クライアントが解釈できない形式を返すと取得が失敗するため
+      source: 2026-08-25 設計相談。フルスクラッチ実装で誤りやすい箇所として特定された
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::manifest_media_type_negotiation
+
+  - id: REQ-0034
+    title: マニフェストリストの透過
+    statement: 要求されたマニフェストがマニフェストリストである時、システムはプラットフォームの選択を行わずマニフェストリストのまま返さなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0030]
+    terms: [マニフェスト, マニフェストリスト]
+    tags: [api, conformance]
+    rationale:
+      why: 対象環境には arm64 の構成と amd64 の構成の双方の利用者がおり、システム側でプラットフォームを選ぶと利用者が必要とする構成を取得できなくなるため
+      source: 2026-08-25 設計相談。Raspberry Pi による構成とワークステーションが併存する前提
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::manifest_list_passed_through_unmodified
+
+  - id: REQ-0035
+    title: 範囲指定取得への対応
+    statement: クライアントが Range ヘッダを指定して blob を要求した時、システムは指定された範囲のみを返さなければならない
+    type: constraint
+    status: active
+    priority: should
+    depends_on: [REQ-0030]
+    terms: [blob]
+    tags: [api, conformance]
+    rationale:
+      why: containerd は中断した取得の再開に範囲指定を用いるため、対応しなければ大きなレイヤーの取得が中断のたびに最初からやり直しになるため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::range_request_returns_partial_content
+
+  - id: REQ-0036
+    title: 書き込み系エンドポイントへの応答
+    statement: クライアントが書き込み系エンドポイントへ要求を送信した時、システムは HTTP 405 Method Not Allowed を返さなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0031]
+    terms: [書き込み系エンドポイント]
+    tags: [api, conformance]
+    rationale:
+      why: REQ-0031 は実装しないことだけを定めており応答が規定されていないため、経路が存在しないことによる 404 と区別できず、push を試みた利用者にはイメージが存在しないという誤った手掛かりだけが返るため。状態番号を要求文に書かなければ 403 や 404 も適合してしまい、意図した応答が要求から判定できない
+      source: 2026-08-25 要求レビュー。distribution の読み取り専用モードが同じ状況で 405 を返す前例に基づく
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::push_request_is_rejected_as_not_allowed

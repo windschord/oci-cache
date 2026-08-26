@@ -1,0 +1,143 @@
+# UI 領域の要求
+# 保持内容の可視化と監視連携に関する要求
+
+requirements:
+  - id: REQ-0040
+    title: 保持内容の一覧表示
+    statement: 利用者が Web UI を開いた時、システムは保存済みのリポジトリ参照とタグの一覧を表示しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-003]
+    terms: [リポジトリ参照]
+    tags: [ui]
+    rationale:
+      why: 何が保持されているかを確認する手段が存在しないことが、既存のプロキシ実装を採用しなかった主要な理由であるため
+      source: 2026-08-25 tsk さんの要求。rpardini/docker-registry-proxy に UI がない点が課題として挙げられた
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/ui.rs::catalog_lists_stored_repositories
+
+  - id: REQ-0041
+    title: 取得元の表示
+    statement: Web UI が保存済みのイメージを表示する時、システムはその取得元である上流レジストリを併せて表示しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-003]
+    depends_on: [REQ-0022]
+    terms: [上流レジストリ]
+    tags: [ui]
+    rationale:
+      why: 順序フォールバックでは取得元が設定順序に依存して決まるため、意図しない上流レジストリから取得していないかを運用者が確認できる必要があるため
+      source: 2026-08-25 設計相談。名前衝突の可能性を運用で検知する手段として位置付ける
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/ui.rs::image_entry_shows_source_upstream
+
+  - id: REQ-0042
+    title: キャッシュ統計の表示
+    statement: 利用者が Web UI を開いた時、システムはキャッシュの命中回数と不命中回数、および保存領域の使用量を表示しなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-003]
+    tags: [ui]
+    rationale:
+      why: キャッシュが効いているかを判断する材料がなければ、設定順序と有効期間を調整する根拠が得られないため
+      source: 2026-08-25 設計相談
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/ui.rs::stats_endpoint_reports_hit_and_miss
+
+  - id: REQ-0043
+    title: UI の実行ファイルへの同梱
+    statement: システムは Web UI の静的資産を実行ファイルに埋め込み、追加のファイル配置を伴わずに配信しなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0050]
+    tags: [ui, packaging]
+    rationale:
+      why: 単一ファイルでの配布を成立条件としており、UI を別配置にすると配備手順が増えて既存の選択肢に対する優位が失われるため
+      source: 2026-08-25 設計相談。rust-embed による埋め込みを想定した判断
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/ui.rs::assets_served_from_embedded_bundle
+
+  - id: REQ-0044
+    title: メトリクスの公開
+    statement: 監視系がメトリクスの取得を要求した時、システムは Prometheus 形式でキャッシュ統計を返さなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-003]
+    depends_on: [REQ-0042]
+    tags: [ui, observability]
+    rationale:
+      why: 既に運用している VictoriaMetrics と Grafana による監視基盤へ取り込み、他の指標と並べて確認できるようにするため
+      source: 2026-08-25 設計相談。tsk さんの既存の監視構成に合わせる判断
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/ui.rs::metrics_endpoint_exposes_prometheus_format
+
+  - id: REQ-0045
+    title: 強制再取得の連続実行の抑止
+    statement: 利用者が強制再取得を指示した時、システムは同一のイメージに対する次の強制再取得の指示を、設定された抑止時間が経過するまで受け付けてはならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-003, US-004]
+    depends_on: [REQ-0017]
+    tags: [ui, cache]
+    rationale:
+      why: 強制再取得は有効期間を無視して上流レジストリへの問い合わせを直接起こすため、操作を連続して行えると1人の利用者の操作だけで Docker Hub の要求回数制限を消費でき、US-004 が避けようとしている状態を UI 経由で招くため。REQ-0017 は受け付けた指示の振る舞いを定めるものであり、指示を受け付ける間隔はここで定める
+      source: 2026-08-26 tsk さんの指示
+      decided_at: 2026-08-26
+    verification:
+      - kind: test
+        ref: tests/ui.rs::force_refresh_rejected_within_cooldown
+
+  - id: REQ-0046
+    title: 強制再取得の既定抑止時間
+    statement: システムは強制再取得を受け付けない抑止時間の既定を60秒としなければならない
+    type: quality
+    status: active
+    priority: should
+    stories: [US-003]
+    depends_on: [REQ-0045]
+    tags: [ui]
+    rationale:
+      why: 既定値が無ければ REQ-0045 の抑止は運用者が設定を書くまで働かない。60秒であれば連続した操作による上流レジストリへの問い合わせの増加を抑えられ、更新を確かめたい運用者が次の指示までに待つ時間としても運用上受け入れられる長さである
+      source: 2026-08-26 tsk さんの決定
+      decided_at: 2026-08-26
+    measures:
+      - subject: ui.force_refresh.cooldown
+        op: "=="
+        value: 60
+        unit: sec
+    verification:
+      - kind: test
+        ref: tests/ui.rs::force_refresh_cooldown_default_is_60_seconds
+
+  - id: REQ-0047
+    title: 抑止中の強制再取得操作の表示
+    statement: 強制再取得の抑止時間が経過していない時、システムは Web UI 上で強制再取得の操作を実行できない状態として表示しなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-003]
+    depends_on: [REQ-0045]
+    tags: [ui]
+    rationale:
+      why: 抑止を応答だけで返すと利用者には操作が効かない理由が分からず、押し続ける形で操作が繰り返されるため。実行できないことを画面上で示せば、操作する前に抑止されていることが分かる
+      source: 2026-08-26 tsk さんの指示
+      decided_at: 2026-08-26
+    verification:
+      - kind: test
+        ref: tests/ui.rs::force_refresh_control_disabled_during_cooldown

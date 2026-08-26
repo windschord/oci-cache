@@ -1,0 +1,94 @@
+# 用語集と検査ポリシー
+# oci-cache: 複数上流に対応するプルスルーキャッシュ
+
+terms:
+  - name: 上流レジストリ
+    definition: イメージの取得元となる外部のコンテナレジストリ。docker.io、ghcr.io、quay.io を指す
+    aliases: [オリジンレジストリ, リモートレジストリ, アップストリーム]
+
+  - name: プルスルーキャッシュ
+    definition: クライアントからの取得要求を受けて上流レジストリから取得し、その内容を保持して以降の同一要求に応答する仕組み
+    aliases: [プロキシキャッシュ, ミラーキャッシュ]
+
+  - name: 名前空間ヒント
+    definition: containerd が hosts.toml で設定されたミラー宛の要求に付与する ns クエリパラメータ。元の上流レジストリの識別子を値に持つ
+    aliases: [nsパラメータ, namespaceパラメータ]
+
+  - name: 順序フォールバック
+    definition: 上流レジストリを設定された順序で問い合わせ、最初に成功応答を返した上流の結果を採用する解決方式
+    aliases: [順次探索, フォールバック探索]
+
+  - name: ルーティングメモ
+    definition: リポジトリ参照と、その参照を提供した上流レジストリの対応を記録したもの。順序フォールバックの再実行を省くために用いる
+    aliases: [ルーティングキャッシュ, 経路記憶]
+
+  - name: ネガティブキャッシュ
+    definition: すべての上流レジストリが不存在を返した事実を有効期間付きで記録したもの
+    aliases: [不在キャッシュ, 負のキャッシュ]
+
+  - name: OCI Image Layout
+    definition: OCI Image Specification が定めるディスク上の配置仕様。oci-layout、blobs/<アルゴリズム>/<ダイジェスト>、index.json から成る
+    aliases: [OCIレイアウト]
+
+  - name: blob
+    definition: ダイジェストで内容が一意に定まるバイナリ本体。レイヤーおよびイメージ設定を含む
+    aliases: [ブロブ, レイヤー本体]
+
+  - name: マニフェスト
+    definition: 1つのイメージを構成する設定とレイヤーのダイジェストを列挙した文書
+    aliases: [イメージマニフェスト]
+
+  - name: マニフェストリスト
+    definition: 複数のプラットフォーム向けマニフェストへの参照をまとめた文書。OCI Image Index を含む
+    aliases: [マルチアーキマニフェスト, イメージインデックス]
+
+  - name: ダイジェスト
+    definition: 内容から計算された暗号学的ハッシュ値。<アルゴリズム>:<16進数> の形式を取り、本システムでは sha256 を用いる
+    aliases: [コンテンツハッシュ]
+
+  - name: リポジトリ参照
+    definition: 上流レジストリ内でイメージを識別するパス。library/nginx や prometheus/prometheus といった形式を取る
+    aliases: [リポジトリ名, イメージ名]
+
+  - name: 取得系エンドポイント
+    definition: OCI Distribution Specification が定めるエンドポイントのうち、マニフェストと blob の取得および存在確認を行うもの
+    aliases: [pull エンドポイント]
+
+  - name: 書き込み系エンドポイント
+    definition: OCI Distribution Specification が定めるエンドポイントのうち、マニフェストと blob の登録・更新・削除を行うもの
+    aliases: [push エンドポイント]
+
+  - name: 公開イメージ
+    definition: 認証情報を用いずに上流レジストリから取得できるイメージ
+    aliases: [パブリックイメージ]
+
+  - name: 非公開イメージ
+    definition: 認証情報がなければ上流レジストリから取得できないイメージ
+    aliases: [プライベートイメージ]
+
+policy:
+  ambiguous_words:
+    - 適切に
+    - 適宜
+    - 必要に応じて
+    - など
+    - なるべく
+    - 可能な限り
+    - 高速
+    - 十分
+    - 柔軟
+    - 簡単に
+    - 素早く
+    - 使いやすい
+    - ユーザーフレンドリー
+    - 基本的に
+    - 原則として
+    - 極力
+    - 軽量
+    - シンプル
+
+  # 対応する上流レジストリの列挙は複数値が正当
+  multi_value_keys:
+    - routing.upstream.initial
+
+  stale_days: 365

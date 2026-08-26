@@ -1,0 +1,113 @@
+# プラットフォーム領域の要求
+# 配備形態、資源消費、対応環境に関する要求
+
+requirements:
+  - id: REQ-0050
+    title: 単一実行ファイルでの動作
+    statement: システムは外部のデータベースと追加の常駐プロセスを必要とせず、単一の実行ファイルで動作しなければならない
+    type: constraint
+    status: active
+    priority: must
+    stories: [US-006]
+    tags: [platform, packaging]
+    rationale:
+      why: 既存の選択肢を退けた最大の理由が構成要素の多さであり、単一の実行ファイルで完結することが本プロジェクトの存在意義そのものであるため
+      source: 2026-08-25 tsk さんの判断。Harbor と Nexus の評価時に明確化された
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - PostgreSQL を必要とする Harbor と同種の構成
+        - JVM 上で動作する Nexus と同種の構成
+        - nginx と索引プロセスを組み合わせる二重構成
+    asserts:
+      - key: platform.deployment
+        value: single_binary
+    verification:
+      - kind: review
+        ref: 配布物が単一実行ファイルであることの確認手順
+
+  - id: REQ-0051
+    title: 中継時のメモリ非蓄積
+    statement: システムは blob を上流レジストリから取得してクライアントへ中継する時、その blob の全体を主記憶上に保持してはならない
+    type: constraint
+    status: active
+    priority: must
+    stories: [US-006]
+    terms: [blob, 上流レジストリ]
+    tags: [platform, performance]
+    rationale:
+      why: レイヤーは1つで数百メガバイトに達することがあり、全体を主記憶に保持すると同時に処理する要求の数に比例して主記憶を使い切るため
+      source: 2026-08-25 設計相談。rust-oci-client の pull_blob_stream を用いる前提で成立する要求
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/platform.rs::large_blob_relay_does_not_buffer_whole_body
+
+  # --- 墓標: 自前でメモリ上限を持つ方針は REQ-0055 へ置換された ---
+  - id: REQ-0052
+    title: 常駐メモリの上限
+    statement: システムは定常状態における常駐メモリの使用量を定められた値以下に保たなければならない
+    type: quality
+    status: superseded
+    priority: should
+    stories: [US-006]
+    tags: [platform]
+    rationale:
+      why: 配備先の機器と同居するワークロードによって許容量が変わるため、上限値を決めなければ達成の可否を判定できないため
+      source: 2026-08-25 設計相談。具体値は tsk さんの確認待ち
+      decided_at: 2026-08-25
+      retired_why: システム自身が常駐メモリの上限を持つ方針を取りやめ、実行環境が課す制限に委ねる方針へ転換したため。REQ-0055 に置き換えた
+
+  - id: REQ-0053
+    title: 対応アーキテクチャ
+    statement: システムは linux/arm64 と linux/amd64 の双方で動作する実行ファイルを提供しなければならない
+    type: constraint
+    status: active
+    priority: must
+    stories: [US-006]
+    tags: [platform, packaging]
+    rationale:
+      why: 対象環境に Raspberry Pi による arm64 の構成と amd64 の構成が併存しており、いずれか一方のみでは配備先が限られるため
+      source: 2026-08-25 設計相談。tsk さんの既存のホームラボ構成に基づく
+      decided_at: 2026-08-25
+    verification:
+      - kind: review
+        ref: 双方のアーキテクチャ向け成果物が生成されることの確認手順
+
+  - id: REQ-0054
+    title: TLS 接続の受け入れ
+    statement: 運用者が証明書と秘密鍵を設定した時、システムは TLS による接続を受け付けなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-001]
+    tags: [platform, security]
+    rationale:
+      why: Docker Engine は既定で TLS による接続を要求するため、TLS を用いない場合はすべてのクライアントに個別の設定変更が必要になるため
+      source: 2026-08-25 設計相談。tsk さんが acme.sh と Cloud DNS による証明書管理の仕組みを既に運用している前提
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/platform.rs::tls_listener_accepts_configured_certificate
+
+  - id: REQ-0055
+    title: 常駐メモリ上限の実行環境への委譲
+    statement: システムは常駐メモリの使用量に自身で上限を設けず、実行環境が課す制限に従って動作しなければならない
+    type: constraint
+    status: active
+    priority: must
+    stories: [US-006]
+    supersedes: [REQ-0052]
+    depends_on: [REQ-0051]
+    tags: [platform]
+    rationale:
+      why: メモリの上限は OS の制御機構またはコンテナ実行環境の設定で課すのが配備先ごとの実情に合っており、システム側が独自の上限を持つと二重の制御になって障害時の原因の切り分けを難しくするため
+      source: 2026-08-25 tsk さんの決定
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - システム自身が常駐メモリの上限値を設定として持つ方式
+    asserts:
+      - key: platform.memory_limit.owner
+        value: runtime
+    verification:
+      - kind: review
+        ref: 独自のメモリ上限機構を持たないことを確認するコードレビュー手順

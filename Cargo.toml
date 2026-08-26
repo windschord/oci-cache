@@ -1,0 +1,54 @@
+[package]
+name = "oci-cache"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "複数の上流レジストリに対応する、パス透過なプルスルーキャッシュ"
+license = "Apache-2.0"
+repository = "https://github.com/windschord/oci-cache"
+readme = "README.md"
+
+[dependencies]
+# HTTP サーバ
+axum = { version = "0.8", features = ["http2", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["trace", "set-header"] }
+hyper = "1"
+
+# 上流レジストリとの通信（REQ-0051: ストリーム取得が必須要件）
+oci-client = "0.17"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+
+# 保存とインデックス（REQ-0020 / REQ-0050）
+redb = "4"
+sha2 = "0.11"
+hex = "0.4"
+
+# UI の同梱（REQ-0043）
+rust-embed = { version = "8", features = ["mime-guess"] }
+
+# 設定・直列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# 観測（REQ-0044）
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
+
+# 誤り処理
+thiserror = "2"
+anyhow = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+wiremock = "0.6"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
