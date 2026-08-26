@@ -43,12 +43,20 @@ terms:
     aliases: [マルチアーキマニフェスト, イメージインデックス]
 
   - name: ダイジェスト
-    definition: 内容から計算された暗号学的ハッシュ値。sha256:<16進数> の形式を取る
+    definition: 内容から計算された暗号学的ハッシュ値。<アルゴリズム>:<16進数> の形式を取り、本システムでは sha256 を用いる
     aliases: [コンテンツハッシュ]
 
   - name: リポジトリ参照
     definition: 上流レジストリ内でイメージを識別するパス。library/nginx や prometheus/prometheus といった形式を取る
     aliases: [リポジトリ名, イメージ名]
+
+  - name: 取得系エンドポイント
+    definition: OCI Distribution Specification が定めるエンドポイントのうち、マニフェストと blob の取得および存在確認を行うもの
+    aliases: [pull エンドポイント]
+
+  - name: 書き込み系エンドポイント
+    definition: OCI Distribution Specification が定めるエンドポイントのうち、マニフェストと blob の登録・更新・削除を行うもの
+    aliases: [push エンドポイント]
 
   - name: 公開イメージ
     definition: 認証情報を用いずに上流レジストリから取得できるイメージ

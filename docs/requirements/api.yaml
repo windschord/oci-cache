@@ -8,6 +8,7 @@ requirements:
     type: constraint
     status: active
     priority: must
+    terms: [取得系エンドポイント]
     tags: [api, conformance]
     rationale:
       why: containerd と Docker Engine はいずれも仕様に基づいて動作するため、仕様から逸脱すると利用者から原因を特定しにくい失敗として観測されるため
@@ -23,6 +24,7 @@ requirements:
     type: constraint
     status: active
     priority: must
+    terms: [書き込み系エンドポイント]
     tags: [api, scope]
     rationale:
       why: 本システムの用途は上流レジストリの内容を取得して保持することに限られ、書き込みを受け付けると保存領域の管理と認可の要件が増えて成立条件そのものが変わるため
@@ -104,3 +106,20 @@ requirements:
     verification:
       - kind: test
         ref: tests/conformance.rs::range_request_returns_partial_content
+
+  - id: REQ-0036
+    title: 書き込み系エンドポイントへの応答
+    statement: クライアントが書き込み系エンドポイントへ要求を送信した時、システムは HTTP 405 Method Not Allowed を返さなければならない
+    type: constraint
+    status: active
+    priority: must
+    depends_on: [REQ-0031]
+    terms: [書き込み系エンドポイント]
+    tags: [api, conformance]
+    rationale:
+      why: REQ-0031 は実装しないことだけを定めており応答が規定されていないため、経路が存在しないことによる 404 と区別できず、push を試みた利用者にはイメージが存在しないという誤った手掛かりだけが返るため。状態番号を要求文に書かなければ 403 や 404 も適合してしまい、意図した応答が要求から判定できない
+      source: 2026-08-25 要求レビュー。distribution の読み取り専用モードが同じ状況で 405 を返す前例に基づく
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/conformance.rs::push_request_is_rejected_as_not_allowed

@@ -116,23 +116,6 @@ requirements:
       - kind: test
         ref: tests/cache.rs::tag_manifest_default_ttl_is_30_minutes
 
-  - id: REQ-0017
-    title: 保存内容の強制再取得
-    statement: 利用者が Web UI から再取得を指示した時、システムは有効期間の残りにかかわらず上流レジストリへ問い合わせ、保存内容を更新しなければならない
-    type: functional
-    status: active
-    priority: must
-    stories: [US-003, US-004]
-    terms: [上流レジストリ]
-    tags: [cache, ui]
-    rationale:
-      why: 有効期間の既定を30分としたため、更新を直ちに反映させたい場合に待つ以外の手段がなくなり、有効期間を短く設定し直す以外に回避策のない状態になるため
-      source: 2026-08-25 tsk さんの指示
-      decided_at: 2026-08-25
-    verification:
-      - kind: test
-        ref: tests/ui.rs::force_refresh_bypasses_remaining_ttl
-
   - id: REQ-0016
     title: 上流認証情報の利用
     statement: 運用者が上流レジストリの認証情報を設定した時、システムは当該上流レジストリへの問い合わせにその認証情報を使用しなければならない
@@ -150,3 +133,58 @@ requirements:
     verification:
       - kind: test
         ref: tests/cache.rs::configured_credentials_used_for_upstream_request
+
+  - id: REQ-0017
+    title: 保存内容の強制再取得
+    statement: 利用者が Web UI から再取得を指示した時、システムは有効期間の残りにかかわらず上流レジストリへ問い合わせ、保存内容を更新しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-003, US-004]
+    terms: [上流レジストリ]
+    tags: [cache, ui]
+    rationale:
+      why: 有効期間の既定を30分としたため、更新を直ちに反映させたい場合に待つ以外の手段がなくなり、有効期間を短く設定し直す以外に回避策のない状態になるため
+      source: 2026-08-25 tsk さんの指示
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/ui.rs::force_refresh_bypasses_remaining_ttl
+
+  - id: REQ-0018
+    title: 有効期間の明示指定
+    statement: 運用者がタグ参照マニフェストまたはネガティブキャッシュの有効期間を設定した時、システムは既定値ではなく設定された値を有効期間として使用しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-003, US-004]
+    depends_on: [REQ-0005, REQ-0015]
+    terms: [マニフェスト, ネガティブキャッシュ]
+    tags: [cache]
+    rationale:
+      why: US-003 は運用者が有効期間を調整することを前提にしているが、既定値を定める REQ-0015 と REQ-0005 だけでは変更手段が存在せず、保存領域の上限が REQ-0027 で上書きできるのに対して有効期間には同じ調整余地がないままになるため
+      source: 2026-08-25 要求レビュー。REQ-0027 との非対称として抽出
+      decided_at: 2026-08-25
+    verification:
+      - kind: test
+        ref: tests/cache.rs::configured_ttl_overrides_default
+
+  - id: REQ-0019
+    title: 保存可否の判定基準
+    statement: システムは認証情報を用いない問い合わせで取得できることを確認できたイメージに限り、その内容を保存しなければならない
+    type: constraint
+    status: active
+    priority: must
+    stories: [US-007]
+    depends_on: [REQ-0013, REQ-0016]
+    terms: [公開イメージ, 非公開イメージ, 上流レジストリ]
+    tags: [cache, security]
+    rationale:
+      why: REQ-0016 により上流レジストリへの問い合わせには認証情報が用いられるため、取得が成功した事実だけでは非公開イメージと公開イメージを区別できず、判定基準を定めなければ REQ-0013 は検証も実装もできない規定にとどまるため
+      source: 2026-08-25 要求レビュー。REQ-0013 と REQ-0016 の間に判定手段が欠けている点を指摘
+      decided_at: 2026-08-25
+      alternatives_rejected:
+        - 上流レジストリが返す応答符号のみで非公開と判断する方式
+    verification:
+      - kind: test
+        ref: tests/cache.rs::persistence_requires_anonymous_pull_success

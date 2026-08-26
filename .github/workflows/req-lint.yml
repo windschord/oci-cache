@@ -1,0 +1,74 @@
+# 要求レジストリの検査
+#
+# 要求は docs/requirements/ の YAML が唯一の正であり、矛盾の検出は人手の
+# レビューではなく reqctl.py に任せる方針を取っている。PR の時点で検査を
+# 通しておかないと、矛盾したまま要求が積み上がって後から解けなくなる。
+name: req-lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 検査しかしない。checkout が既定でトークンを Git 設定へ残し、後続の pip と
+# cargo の処理から触れる状態になるため、権限を落としたうえで保持もさせない
+permissions:
+  contents: read
+
+jobs:
+  requirements:
+    name: 要求の整合性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: PyYAML の導入
+        run: pip install --disable-pip-version-check pyyaml
+
+      # --check-tests は tests/ が揃った時点で有効化する（CLAUDE.md 参照）
+      - name: 矛盾・欠落の検査
+        run: python3 scripts/reqctl.py validate --strict
+
+      # generated/ は手で編集しない決まりなので、再生成して差分が出るなら
+      # YAML の変更が生成物へ反映されていない
+      # git diff では追跡されていない生成物を見落とすため、status で見る
+      - name: generated/ の再生成漏れ
+        run: |
+          python3 scripts/reqctl.py generate
+          if [ -n "$(git status --porcelain -- docs/requirements/generated)" ]; then
+            echo "generated/ が YAML と一致していません。reqctl.py generate の結果をコミットしてください。" >&2
+            git status --short -- docs/requirements/generated
+            git diff -- docs/requirements/generated
+            exit 1
+          fi
+
+  lint:
+    name: Rust の整形と静的検査
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: clippy と rustfmt の導入
+        run: rustup component add clippy rustfmt
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: 整形の確認
+        run: cargo fmt --all -- --check
+
+      - name: 静的検査
+        run: cargo clippy --all-targets -- -D warnings

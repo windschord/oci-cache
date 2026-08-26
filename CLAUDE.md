@@ -43,14 +43,14 @@ python3 scripts/reqctl.py next-id req         # 採番
 - マニフェストリストをそのまま返すこと（REQ-0034）
 - Range による範囲指定取得（REQ-0035）
 
-push 系のテストは REQ-0031 により意図的に未実装なので skip 設定で落とす。
+push 系のテストは REQ-0031 により意図的に未実装なので skip 設定で落とす。skip するのは上流の conformance スイートが持つ push 系テストだけで、書き込み系エンドポイントが返す応答（REQ-0036 の HTTP 405）は自前の `tests/conformance.rs::push_request_is_rejected_as_not_allowed` で検証する。
 
 ### 順序
 
-1. **ルーティング解決** — REQ-0001 / 0002 / 0003 / 0007
+1. **ルーティング解決** — REQ-0001 / 0002 / 0003 / 0007 / 0009 / 0056 / 0057 / 0058
 2. **上流からの取得と中継** — REQ-0010 / 0051（`oci-client` の `pull_blob_stream` を使う）
 3. **OCI Image Layout による保存** — REQ-0020 / 0021 / 0022
-4. **仕様準拠** — REQ-0030 〜 0035
+4. **仕様準拠** — REQ-0030 〜 0036
 5. **UI と観測** — REQ-0040 〜 0044 / 0017
 
 ### TDD
@@ -58,10 +58,10 @@ push 系のテストは REQ-0031 により意図的に未実装なので skip �
 Red-Green-Refactor で進める。要求の `verification.ref` が指すテスト名をそのまま実装する。
 
 ```
-tests/routing.rs      REQ-0001 〜 0008
-tests/cache.rs        REQ-0010 〜 0017
-tests/storage.rs      REQ-0020 〜 0027
-tests/conformance.rs  REQ-0030 〜 0035
+tests/routing.rs      REQ-0001 〜 0009 / 0056 〜 0058
+tests/cache.rs        REQ-0010 〜 0019
+tests/storage.rs      REQ-0020 〜 0029
+tests/conformance.rs  REQ-0030 〜 0036
 tests/ui.rs           REQ-0040 〜 0044
 tests/platform.rs     REQ-0050 〜 0055
 ```
@@ -78,7 +78,7 @@ tests/platform.rs     REQ-0050 〜 0055
 ③ どちらも無い   → 順序フォールバック docker.io → ghcr.io → quay.io (REQ-0002)
 ```
 
-③ で解決したら ①② のために必ず記録する。名前衝突は設定順序で決定的に解決し（REQ-0007）、取得元は UI に表示する（REQ-0041）。
+③ で解決したら ①② のために必ず記録する。③ の途中で応答しない上流があれば待ち時間で打ち切って次へ進む（REQ-0057）。記録した上流が不存在を返したら記録を破棄して ③ からやり直し（REQ-0056）、設定順序を変えたときも記録を破棄する（REQ-0058）。名前衝突は設定順序で決定的に解決し（REQ-0007）、取得元は UI に表示する（REQ-0041）。
 
 ### 保存は blob 共有・タグ空間分離
 
