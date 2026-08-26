@@ -13,6 +13,7 @@
 | US-001 | REQ-0054 | 運用者が証明書と秘密鍵を設定した時、システムは TLS による接続を受け付けなければならない | test:tests/platform.rs::tls_listener_accepts_configured_certificate |
 | US-001 | REQ-0056 | 記録された上流レジストリがリポジトリ参照に対して不存在を返した時、システムはその記録を破棄して順序フォールバックを再実行しなければならない | test:tests/routing.rs::routing_memo_discarded_when_recorded_upstream_misses |
 | US-001 | REQ-0057 | 上流レジストリへの問い合わせが設定された待ち時間を超えて応答しない時、システムはその上流レジストリを失敗として扱い、順序フォールバックを次の上流レジストリへ進めなければならない | test:tests/routing.rs::unresponsive_upstream_advances_to_next |
+| US-001 | REQ-0058 | 上流レジストリの設定順序が変更された時、システムはルーティングメモの記録を破棄し、以降の要求では順序フォールバックを再実行しなければならない | test:tests/routing.rs::routing_memo_discarded_when_upstream_order_changes |
 | US-002 | REQ-0001 | クライアントが名前空間ヒントを付与して要求を送信した時、システムは名前空間ヒントが示す上流レジストリのみに問い合わせなければならない | test:tests/routing.rs::ns_hint_selects_single_upstream |
 | US-002 | REQ-0006 | システムはクライアントが指定するイメージ参照に、上流レジストリを識別するための追加のパス要素を要求してはならない | test:tests/routing.rs::pull_path_has_no_upstream_prefix |
 | US-003 | REQ-0009 | 運用者が上流レジストリの識別子を順序付きで設定した時、システムは設定された順序を上流レジストリへの問い合わせ順序として使用しなければならない | test:tests/routing.rs::configured_upstream_order_is_used |
@@ -22,6 +23,7 @@
 | US-003 | REQ-0041 | Web UI が保存済みのイメージを表示する時、システムはその取得元である上流レジストリを併せて表示しなければならない | test:tests/ui.rs::image_entry_shows_source_upstream |
 | US-003 | REQ-0042 | 利用者が Web UI を開いた時、システムはキャッシュの命中回数と不命中回数、および保存領域の使用量を表示しなければならない | test:tests/ui.rs::stats_endpoint_reports_hit_and_miss |
 | US-003 | REQ-0044 | 監視系がメトリクスの取得を要求した時、システムは Prometheus 形式でキャッシュ統計を返さなければならない | test:tests/ui.rs::metrics_endpoint_exposes_prometheus_format |
+| US-003 | REQ-0058 | 上流レジストリの設定順序が変更された時、システムはルーティングメモの記録を破棄し、以降の要求では順序フォールバックを再実行しなければならない | test:tests/routing.rs::routing_memo_discarded_when_upstream_order_changes |
 | US-004 | REQ-0003 | 順序フォールバックによって上流レジストリが確定した時、システムはリポジトリ参照と上流レジストリの対応を記録し、以降の同一リポジトリ参照への要求では探索を行わず記録された上流へ問い合わせなければならない | test:tests/routing.rs::routing_memo_skips_probe_on_second_request |
 | US-004 | REQ-0004 | すべての上流レジストリが対象のリポジトリ参照に対して不存在を返した時、システムはその結果を有効期間付きで記録し、有効期間内は上流レジストリへ再問い合わせせずに不存在を返さなければならない | test:tests/routing.rs::negative_cache_suppresses_reprobe |
 | US-004 | REQ-0005 | システムはネガティブキャッシュの既定の有効期間を30分としなければならない | test:tests/routing.rs::negative_cache_default_ttl_is_30_minutes |
@@ -59,9 +61,9 @@
 - REQ-0033: クライアントが Accept ヘッダで受け入れ可能なメディアタイプを指定した時、システムは指定された範囲に含まれるメディアタイプでマニフェストを返さなければならない
 - REQ-0034: 要求されたマニフェストがマニフェストリストである時、システムはプラットフォームの選択を行わずマニフェストリストのまま返さなければならない
 - REQ-0035: クライアントが Range ヘッダを指定して blob を要求した時、システムは指定された範囲のみを返さなければならない
-- REQ-0036: クライアントが書き込み系エンドポイントへ要求を送信した時、システムは要求が許可されていないことを示す応答を返さなければならない
+- REQ-0036: クライアントが書き込み系エンドポイントへ要求を送信した時、システムは HTTP 405 Method Not Allowed を返さなければならない
 - REQ-0043: システムは Web UI の静的資産を実行ファイルに埋め込み、追加のファイル配置を伴わずに配信しなければならない
 
 ## カバレッジ
 
-- 検証手段が定義された有効要求: 48/48（100%）
+- 検証手段が定義された有効要求: 49/49（100%）

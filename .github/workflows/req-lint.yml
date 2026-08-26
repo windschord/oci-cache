@@ -10,12 +10,19 @@ on:
   push:
     branches: [main]
 
+# 検査しかしない。checkout が既定でトークンを Git 設定へ残し、後続の pip と
+# cargo の処理から触れる状態になるため、権限を落としたうえで保持もさせない
+permissions:
+  contents: read
+
 jobs:
   requirements:
     name: 要求の整合性
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -46,6 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: clippy と rustfmt の導入
         run: rustup component add clippy rustfmt

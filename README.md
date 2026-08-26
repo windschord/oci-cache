@@ -35,7 +35,9 @@ GET /v2/library/nginx/manifests/latest
   └─ ③ どちらも無い
         → 順序フォールバック: docker.io → ghcr.io → quay.io
            最初に成功した上流を採用し、①②のために記録する
+           応答しない上流は待ち時間で打ち切って次へ進む（REQ-0057）
            記録した上流が不存在を返したら記録を破棄して③をやり直す（REQ-0056）
+           設定順序を変えたときも記録を破棄する（REQ-0058）
 ```
 
 - **①** は containerd が `hosts.toml` 経由のミラー要求に付与する `ns` クエリパラメータを使う。Kubernetes からの取得はこれで決定的に解決する
@@ -83,7 +85,7 @@ python3 scripts/reqctl.py stats               # 件数サマリ
 
 PR では `.github/workflows/req-lint.yml` が同じ検査（`validate --strict` と `generated/` の再生成漏れ）を実行する。
 
-現状: 要求 49 件（active 48 / superseded 1）、ストーリー 7 件、用語 16 件。
+現状: 要求 50 件（active 49 / superseded 1）、ストーリー 7 件、用語 16 件。
 
 主な既定値:
 
@@ -112,7 +114,7 @@ PR では `.github/workflows/req-lint.yml` が同じ検査（`validate --strict`
 
 想定順序:
 
-1. ルーティング解決（REQ-0001 / 0002 / 0003 / 0007 / 0009 / 0056）
+1. ルーティング解決（REQ-0001 / 0002 / 0003 / 0007 / 0009 / 0056 / 0057 / 0058）
 2. 上流からの取得と中継（REQ-0010 / 0051）
 3. OCI Image Layout による保存（REQ-0020 / 0021 / 0022）
 4. 仕様準拠（REQ-0030 〜 0036）

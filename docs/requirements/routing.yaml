@@ -224,3 +224,21 @@ requirements:
     verification:
       - kind: test
         ref: tests/routing.rs::unresponsive_upstream_advances_to_next
+
+  - id: REQ-0058
+    title: 設定順序の変更によるルーティングメモの破棄
+    statement: 上流レジストリの設定順序が変更された時、システムはルーティングメモの記録を破棄し、以降の要求では順序フォールバックを再実行しなければならない
+    type: functional
+    status: active
+    priority: must
+    stories: [US-001, US-003]
+    depends_on: [REQ-0003, REQ-0009, REQ-0056]
+    terms: [ルーティングメモ, 順序フォールバック, 上流レジストリ]
+    tags: [routing]
+    rationale:
+      why: REQ-0007 は設定順序が最も先である上流の応答を返すことを定めるが、REQ-0003 の記録は設定順序と無関係に再利用されるため、順序を変更しても記録済みのリポジトリ参照だけは古い順序で解決され続け、REQ-0007 が満たされない状態が残るため。REQ-0056 の破棄は記録された上流が不存在を返した場合に限られ、同じ内容を返し続ける限り契機が来ない
+      source: 2026-08-26 CodeRabbit のレビュー指摘。REQ-0056 の破棄条件が不存在に限られる点として提起された
+      decided_at: 2026-08-26
+    verification:
+      - kind: test
+        ref: tests/routing.rs::routing_memo_discarded_when_upstream_order_changes
