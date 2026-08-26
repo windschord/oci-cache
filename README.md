@@ -81,6 +81,8 @@ python3 scripts/reqctl.py stats               # 件数サマリ
 | [generated/traceability.md](docs/requirements/generated/traceability.md) | ストーリー → 要求 → 検証手段 |
 | [generated/graph.md](docs/requirements/generated/graph.md) | 要求間の関係グラフ |
 
+PR では `.github/workflows/req-lint.yml` が同じ検査（`validate --strict` と `generated/` の再生成漏れ）を実行する。
+
 現状: 要求 49 件（active 48 / superseded 1）、ストーリー 7 件、用語 16 件。
 
 主な既定値:
