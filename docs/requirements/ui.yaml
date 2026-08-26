@@ -85,3 +85,59 @@ requirements:
     verification:
       - kind: test
         ref: tests/ui.rs::metrics_endpoint_exposes_prometheus_format
+
+  - id: REQ-0045
+    title: 強制再取得の連続実行の抑止
+    statement: 利用者が強制再取得を指示した時、システムは同一のイメージに対する次の強制再取得の指示を、設定された抑止時間が経過するまで受け付けてはならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-003, US-004]
+    depends_on: [REQ-0017]
+    tags: [ui, cache]
+    rationale:
+      why: 強制再取得は有効期間を無視して上流レジストリへの問い合わせを直接起こすため、操作を連続して行えると1人の利用者の操作だけで Docker Hub の要求回数制限を消費でき、US-004 が避けようとしている状態を UI 経由で招くため。REQ-0017 は受け付けた指示の振る舞いを定めるものであり、指示を受け付ける間隔はここで定める
+      source: 2026-08-26 tsk さんの指示
+      decided_at: 2026-08-26
+    verification:
+      - kind: test
+        ref: tests/ui.rs::force_refresh_rejected_within_cooldown
+
+  - id: REQ-0046
+    title: 強制再取得の既定抑止時間
+    statement: システムは強制再取得を受け付けない抑止時間の既定を60秒としなければならない
+    type: quality
+    status: active
+    priority: should
+    stories: [US-003]
+    depends_on: [REQ-0045]
+    tags: [ui]
+    rationale:
+      why: 既定値が無ければ REQ-0045 の抑止は運用者が設定を書くまで働かない。60秒であれば連続した操作による上流レジストリへの問い合わせの増加を抑えられ、更新を確かめたい運用者が次の指示までに待つ時間としても運用上受け入れられる長さである
+      source: 2026-08-26 tsk さんの決定
+      decided_at: 2026-08-26
+    measures:
+      - subject: ui.force_refresh.cooldown
+        op: "=="
+        value: 60
+        unit: sec
+    verification:
+      - kind: test
+        ref: tests/ui.rs::force_refresh_cooldown_default_is_60_seconds
+
+  - id: REQ-0047
+    title: 抑止中の強制再取得操作の表示
+    statement: 強制再取得の抑止時間が経過していない時、システムは Web UI 上で強制再取得の操作を実行できない状態として表示しなければならない
+    type: functional
+    status: active
+    priority: should
+    stories: [US-003]
+    depends_on: [REQ-0045]
+    tags: [ui]
+    rationale:
+      why: 抑止を応答だけで返すと利用者には操作が効かない理由が分からず、押し続ける形で操作が繰り返されるため。実行できないことを画面上で示せば、操作する前に抑止されていることが分かる
+      source: 2026-08-26 tsk さんの指示
+      decided_at: 2026-08-26
+    verification:
+      - kind: test
+        ref: tests/ui.rs::force_refresh_control_disabled_during_cooldown

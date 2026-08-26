@@ -242,3 +242,26 @@ requirements:
     verification:
       - kind: test
         ref: tests/routing.rs::routing_memo_discarded_when_upstream_order_changes
+
+  - id: REQ-0059
+    title: 上流問い合わせの既定待ち時間
+    statement: システムは上流レジストリへの問い合わせの既定の待ち時間を5秒としなければならない
+    type: quality
+    status: active
+    priority: should
+    stories: [US-001]
+    depends_on: [REQ-0057]
+    terms: [上流レジストリ]
+    tags: [routing]
+    rationale:
+      why: 既定値が無ければ REQ-0057 の打ち切りは運用者が設定を書くまで働かず、初回起動の時点から応答しない上流に取得が滞留するため。5秒であれば正常時の応答（数百ミリ秒）に対して回線の揺らぎを吸収でき、3つの上流を順に試す最悪の場合でも待ち時間が15秒に収まる
+      source: 2026-08-26 tsk さんの決定
+      decided_at: 2026-08-26
+    measures:
+      - subject: routing.upstream.probe_timeout
+        op: "=="
+        value: 5
+        unit: sec
+    verification:
+      - kind: test
+        ref: tests/routing.rs::upstream_probe_timeout_default_is_5_seconds
