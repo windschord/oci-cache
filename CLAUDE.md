@@ -57,7 +57,7 @@ push 系のテストは REQ-0031 により意図的に未実装なので skip �
 
 Red-Green-Refactor で進める。要求の `verification.ref` が指すテスト名をそのまま実装する。
 
-```
+```text
 tests/routing.rs      REQ-0001 〜 0009 / 0056 〜 0059
 tests/cache.rs        REQ-0010 〜 0019
 tests/storage.rs      REQ-0020 〜 0029
