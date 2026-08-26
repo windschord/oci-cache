@@ -43,7 +43,7 @@ python3 scripts/reqctl.py next-id req         # 採番
 - マニフェストリストをそのまま返すこと（REQ-0034）
 - Range による範囲指定取得（REQ-0035）
 
-push 系のテストは REQ-0031 により意図的に未実装なので skip 設定で落とす。
+push 系のテストは REQ-0031 により意図的に未実装なので skip 設定で落とす。skip するのは上流の conformance スイートが持つ push 系テストだけで、書き込み系エンドポイントが返す応答（REQ-0036 の HTTP 405）は自前の `tests/conformance.rs::push_request_is_rejected_as_not_allowed` で検証する。
 
 ### 順序
 
