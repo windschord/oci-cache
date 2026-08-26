@@ -51,7 +51,7 @@ push 系のテストは REQ-0031 により意図的に未実装なので skip �
 2. **上流からの取得と中継** — REQ-0010 / 0051（`oci-client` の `pull_blob_stream` を使う）
 3. **OCI Image Layout による保存** — REQ-0020 / 0021 / 0022
 4. **仕様準拠** — REQ-0030 〜 0036
-5. **UI と観測** — REQ-0040 〜 0044 / 0017
+5. **UI と観測** — REQ-0040 〜 0047 / 0017
 
 ### TDD
 
@@ -62,7 +62,7 @@ tests/routing.rs      REQ-0001 〜 0009 / 0056 〜 0059
 tests/cache.rs        REQ-0010 〜 0019
 tests/storage.rs      REQ-0020 〜 0029
 tests/conformance.rs  REQ-0030 〜 0036
-tests/ui.rs           REQ-0040 〜 0044
+tests/ui.rs           REQ-0040 〜 0047
 tests/platform.rs     REQ-0050 〜 0055
 ```
 

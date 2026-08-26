@@ -9,7 +9,7 @@
 //! 2. 上流からの取得と中継（REQ-0010 / REQ-0051）
 //! 3. OCI Image Layout による保存（REQ-0020 / REQ-0021 / REQ-0022）
 //! 4. 仕様準拠（REQ-0030 〜 REQ-0036）
-//! 5. UI と観測（REQ-0040 〜 REQ-0044）
+//! 5. UI と観測（REQ-0040 〜 REQ-0047）
 
 fn main() {
     eprintln!("oci-cache: 未実装です。docs/requirements/ を参照してください。");

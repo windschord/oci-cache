@@ -85,7 +85,7 @@ python3 scripts/reqctl.py stats               # 件数サマリ
 
 PR では `.github/workflows/req-lint.yml` が同じ検査（`validate --strict` と `generated/` の再生成漏れ）を実行する。
 
-現状: 要求 51 件（active 50 / superseded 1）、ストーリー 7 件、用語 16 件。
+現状: 要求 54 件（active 53 / superseded 1）、ストーリー 7 件、用語 16 件。
 
 主な既定値:
 
@@ -96,8 +96,9 @@ PR では `.github/workflows/req-lint.yml` が同じ検査（`validate --strict`
 | 保存領域の上限 | ファイルシステム全容量の 50% | REQ-0026 |
 | 常駐メモリの上限 | 設けない（OS / コンテナに委ねる） | REQ-0055 |
 | 上流問い合わせの待ち時間 | 5秒 | REQ-0059 |
+| 強制再取得の抑止時間 | 60秒 | REQ-0046 |
 
-有効期間は UI からの強制再取得で待たずに更新できる（REQ-0017）。保存領域の上限は設定で上書きできる（REQ-0027）。
+有効期間は UI からの強制再取得で待たずに更新できる（REQ-0017）。連続した強制再取得は抑止時間の間だけ受け付けない（REQ-0045）。保存領域の上限は設定で上書きできる（REQ-0027）。
 
 ## 技術選定
 
@@ -119,7 +120,7 @@ PR では `.github/workflows/req-lint.yml` が同じ検査（`validate --strict`
 2. 上流からの取得と中継（REQ-0010 / 0051）
 3. OCI Image Layout による保存（REQ-0020 / 0021 / 0022）
 4. 仕様準拠（REQ-0030 〜 0036）
-5. UI と観測（REQ-0040 〜 0044）
+5. UI と観測（REQ-0040 〜 0047）
 
 ## ライセンス
 
