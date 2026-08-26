@@ -14,6 +14,7 @@
 | US-001 | REQ-0056 | 記録された上流レジストリがリポジトリ参照に対して不存在を返した時、システムはその記録を破棄して順序フォールバックを再実行しなければならない | test:tests/routing.rs::routing_memo_discarded_when_recorded_upstream_misses |
 | US-001 | REQ-0057 | 上流レジストリへの問い合わせが設定された待ち時間を超えて応答しない時、システムはその上流レジストリを失敗として扱い、順序フォールバックを次の上流レジストリへ進めなければならない | test:tests/routing.rs::unresponsive_upstream_advances_to_next |
 | US-001 | REQ-0058 | 上流レジストリの設定順序が変更された時、システムはルーティングメモの記録を破棄し、以降の要求では順序フォールバックを再実行しなければならない | test:tests/routing.rs::routing_memo_discarded_when_upstream_order_changes |
+| US-001 | REQ-0059 | システムは上流レジストリへの問い合わせの既定の待ち時間を5秒としなければならない | test:tests/routing.rs::upstream_probe_timeout_default_is_5_seconds |
 | US-002 | REQ-0001 | クライアントが名前空間ヒントを付与して要求を送信した時、システムは名前空間ヒントが示す上流レジストリのみに問い合わせなければならない | test:tests/routing.rs::ns_hint_selects_single_upstream |
 | US-002 | REQ-0006 | システムはクライアントが指定するイメージ参照に、上流レジストリを識別するための追加のパス要素を要求してはならない | test:tests/routing.rs::pull_path_has_no_upstream_prefix |
 | US-003 | REQ-0009 | 運用者が上流レジストリの識別子を順序付きで設定した時、システムは設定された順序を上流レジストリへの問い合わせ順序として使用しなければならない | test:tests/routing.rs::configured_upstream_order_is_used |
@@ -66,4 +67,4 @@
 
 ## カバレッジ
 
-- 検証手段が定義された有効要求: 49/49（100%）
+- 検証手段が定義された有効要求: 50/50（100%）
