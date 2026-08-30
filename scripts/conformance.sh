@@ -70,6 +70,9 @@ TOML
 
 "$BIN" --config "${WORK_DIR}/config.toml" > "${WORK_DIR}/server.log" 2>&1 &
 readonly SERVER_PID=$!
+
+# 被試験サーバを確実に止める。スイートが途中で落ちても待ち受けが残ると、
+# 次の実行が前回のプロセスを相手に走ってしまうため
 cleanup() { kill "$SERVER_PID" 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -99,15 +102,22 @@ fi
 readonly SINGLE_TYPES='application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
 readonly INDEX_TYPES='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json'
 
-fetch_manifest() { # $1: 参照（タグまたはダイジェスト）, $2: 保存先
+# マニフェストを1つ取得してファイルへ落とす。
+#   $1: 参照（タグまたはダイジェスト）
+#   $2: 保存先のパス
+fetch_manifest() {
   curl -fsS -H "Accept: ${SINGLE_TYPES},${INDEX_TYPES}" -o "$2" \
     "${ROOT_URL}/v2/${NAMESPACE}/manifests/$1"
 }
 
-# ダイジェストは受信したバイト列そのものから計算する。応答の
-# Docker-Content-Digest ヘッダを使うと、検証したい相手（REQ-0032）の
-# 出力を前提に検証対象を組み立てることになるため
-digest_of() { echo "sha256:$(sha256sum "$1" | cut -d' ' -f1)"; }
+# ファイルの中身から sha256 のダイジェスト文字列を作る。
+#   $1: 対象のファイル
+# 受信したバイト列そのものから計算する。応答の Docker-Content-Digest
+# ヘッダを使うと、検証したい相手（REQ-0032）の出力を前提に検証対象を
+# 組み立てることになるため
+digest_of() {
+  echo "sha256:$(sha256sum "$1" | cut -d' ' -f1)"
+}
 
 readonly MANIFEST_FILE="${WORK_DIR}/manifest.json"
 fetch_manifest "$TAG" "$MANIFEST_FILE"

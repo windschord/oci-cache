@@ -54,23 +54,37 @@ ldd target/release/oci-cache
 ビルドする。手元で先に確かめたいときは workflow_dispatch から実行する。
 
 1. release ワークフローの `build` ジョブが両アーキテクチャで成功していること。
-   片方が落ちた状態で `publish` へ進んでいないこと。
+   片方が落ちた状態で `publish` へ進んでいないこと。`build` には成果物を
+   展開して起動する確認が入っているので、起動しない実行ファイルはここで止まる。
 2. リリースに `oci-cache-linux-amd64.tar.gz` と
    `oci-cache-linux-arm64.tar.gz` の両方が添付されていること。
    それぞれに `.sha256` が並んでいること。
 3. 配備先の実機（amd64 の1台と arm64 の1台）で、展開した実行ファイルが
-   起動して待ち受けに入ること。ここは実機でしか分からないので、
-   ビルドが通っただけで済ませない。
+   起動して待ち受けに入ること。CI のランナーと配備先では OS の版も同居する
+   ものも違うので、ビルドと CI 上の起動確認が通っただけで済ませない。
+
+両方について、それぞれの実機で次を実行する。`ARCH` を `amd64` と `arm64` に
+読み替えて2回行う。
 
 ```bash
-sha256sum -c oci-cache-linux-arm64.tar.gz.sha256
-tar xzf oci-cache-linux-arm64.tar.gz
-./oci-cache-linux-arm64/oci-cache --config config.toml
+ARCH=arm64   # amd64 の実機では amd64
+
+sha256sum -c "oci-cache-linux-${ARCH}.tar.gz.sha256"
+tar xzf "oci-cache-linux-${ARCH}.tar.gz"
+cd "oci-cache-linux-${ARCH}"
+
+# 設定は同梱の雛形から作る。待ち受けと保存先だけ埋めれば起動する
+cp config.example.toml config.toml
+$EDITOR config.toml
+
+./oci-cache --config config.toml &
+curl -fsS http://127.0.0.1:5000/v2/    # 待ち受けに入っていること
 ```
 
 ### 判定
 
-上の3点すべてを満たすこと。3 を省いた場合は、確認できていないものとして扱う。
+上の3点すべてを満たすこと。3 を両アーキテクチャの実機で行っていない場合は、
+行っていないほうを確認できていないものとして扱う。
 
 ---
 

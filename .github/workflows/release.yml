@@ -52,6 +52,41 @@ jobs:
           ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 
+      # 起動しない実行ファイルを配布しない。ビルドが通ったことと、配布物として
+      # 使えることは別で、conformance を非阻害にしている間はなおさら、ここで
+      # 止めないと動かない成果物がリリースへ出てしまう（REQ-0050）
+      - name: 成果物の起動確認
+        run: |
+          set -euo pipefail
+          name="${{ steps.package.outputs.name }}"
+          work="$(mktemp -d)"
+          tar -C "$work" -xzf "dist/${name}.tar.gz"
+          cat > "${work}/config.toml" <<TOML
+          [server]
+          listen = "127.0.0.1:15000"
+
+          [storage]
+          path = "${work}/data"
+          TOML
+          "${work}/${name}/oci-cache" --config "${work}/config.toml" > "${work}/server.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          ok=0
+          for _ in $(seq 1 50); do
+            if curl -fsS -o /dev/null http://127.0.0.1:15000/v2/; then
+              ok=1
+              break
+            fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+          done
+          if [ "$ok" != 1 ]; then
+            echo "配布物が起動しませんでした。この状態でリリースへ添付しない。" >&2
+            sed 's/^/  | /' "${work}/server.log" >&2
+            exit 1
+          fi
+          echo "起動と /v2/ の応答を確認しました。"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.name }}
