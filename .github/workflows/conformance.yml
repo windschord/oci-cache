@@ -1,0 +1,76 @@
+# OCI distribution-spec の conformance スイート
+#
+# CLAUDE.md の方針どおり、実装より先にスイートを CI へ置いて Red から始める。
+# フルスクラッチで実際に刺さるのは認証でも保存でもなく、Docker-Content-Digest
+# （REQ-0032）、メディアタイプのネゴシエーション（REQ-0033）、マニフェスト
+# リストの扱い（REQ-0034）、範囲指定取得（REQ-0035）といった仕様の細部であり、
+# それを実装の途中で継続的に見たいため。
+#
+# 実行手順は scripts/conformance.sh に置いてある。ワークフローへ直接書くと
+# 手元で再現できず、Red が実装の不足なのか CI 固有の事情なのかを切り分け
+# られなくなるため。
+name: conformance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pull-workflow:
+    # 取得系のみ。書き込み系は REQ-0031 により実装しない方針なので、
+    # 上流スイートの push 系は scripts/conformance.sh 側で無効にしている。
+    # 書き込み系が HTTP 405 を返すこと（REQ-0036）は自前の
+    # tests/conformance.rs::push_request_is_rejected_as_not_allowed で見る
+    name: 取得系の仕様準拠
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-conformance-${{ hashFiles('Cargo.lock') }}
+
+      # 上流の Docker Hub へ実際に取得しにいく。共有ランナーの経路は要求回数
+      # 制限に当たりやすいので、失敗が続くようなら認証情報を設定すること（REQ-0016）
+      - name: スイートの実行
+        id: suite
+        # TODO(REQ-0030): 取得系が通るようになったらこの行を削除して、
+        # 準拠の崩れを検知できる状態にする。実装が済むまでは全件が落ちるため、
+        # 無関係な変更の PR まで赤くならないよう非阻害にしてある
+        continue-on-error: true
+        run: ./scripts/conformance.sh
+
+      - name: 結果の要約
+        if: always()
+        run: |
+          if [ "${{ steps.suite.outcome }}" = "success" ]; then
+            echo "取得系の conformance スイートは全件通過しました（REQ-0030）。" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "conformance.yml の continue-on-error を外せる状態です。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**取得系の conformance スイートは未達です（REQ-0030）。**" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "実装が追いつくまでは想定内の Red です。詳細はログと成果物の report.html を参照してください。" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-report
+          path: .conformance/report/
+          if-no-files-found: ignore

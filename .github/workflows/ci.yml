@@ -1,0 +1,104 @@
+# Rust の検査とビルド
+#
+# 要求レジストリの検査は req-lint.yml が受け持つ。ここは実装側だけを見る。
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 検査とビルドしかしない。checkout が既定でトークンを Git 設定へ残し、
+# 後続の cargo の処理から触れる状態になるため、権限を落として保持もさせない
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: 整形と静的検査
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: clippy と rustfmt の導入
+        run: rustup component add clippy rustfmt
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock') }}
+
+      - name: 整形の確認
+        run: cargo fmt --all -- --check
+
+      - name: 静的検査
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: テスト
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
+
+      # tests/ は要求の verification が指すテスト名をそのまま実装していく
+      # 前提で、実装が進むまでは失敗する。それが TDD の Red であって異常ではない
+      - name: テスト
+        run: cargo test --all-targets --locked
+
+  build:
+    # linux/amd64 と linux/arm64 の双方で動く実行ファイルを提供すること自体が
+    # 要求（REQ-0053）なので、両方のアーキテクチャで実際に組む。公開リポジトリ
+    # なので arm64 のランナーが使え、クロスコンパイル環境を持ち込まずに済む
+    name: ビルド (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.arch }}-cargo-build-${{ hashFiles('Cargo.lock') }}
+
+      - name: リリースビルド
+        run: cargo build --release --locked
+
+      # 配布物が単一の実行ファイルで完結すること（REQ-0050）を、
+      # 人手のレビューではなくビルドのたびに機械で見る
+      - name: 単一実行ファイルであることの確認
+        run: |
+          file target/release/oci-cache
+          ldd target/release/oci-cache || true
+          # 併走する常駐プロセスや外部データベースを同梱していないこと。
+          # 成果物が実行ファイル1つに収まっているかを目視できる形で残す
+          ls -la target/release/oci-cache

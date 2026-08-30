@@ -1,0 +1,33 @@
+/*
+ * Web UI の最小限の見た目。実装時に置き換わる前提で、
+ * 依存を持たないこと（単一実行ファイルへ埋め込むため / REQ-0043）だけを守る。
+ */
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  padding: 2rem;
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+h2 {
+  font-size: 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.note,
+.placeholder {
+  opacity: 0.7;
+}
+
+section {
+  margin-top: 2rem;
+}

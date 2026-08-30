@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>oci-cache</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <!--
+      Web UI の雛形。実装は REQ-0040 〜 REQ-0047 の段階で入る。
+      この時点で置いているのは、静的資産を実行ファイルへ埋め込む方式
+      （rust-embed / REQ-0043）が成立するために埋め込み対象の実体が
+      必要であり、それが無いと組み込み自体を試せないため。
+      値を持たない枠だけを置き、偽の数値は表示しない。
+    -->
+    <header>
+      <h1>oci-cache</h1>
+      <p class="note">Web UI は未実装です（REQ-0040 〜 REQ-0047）。</p>
+    </header>
+
+    <main>
+      <!-- REQ-0040: 保存済みリポジトリの一覧 / REQ-0041: 取得元の上流表示 -->
+      <section id="catalog">
+        <h2>保存済みイメージ</h2>
+        <p class="placeholder">未実装</p>
+      </section>
+
+      <!-- REQ-0042: ヒットとミスの統計 -->
+      <section id="stats">
+        <h2>統計</h2>
+        <p class="placeholder">未実装</p>
+      </section>
+
+      <!-- REQ-0017 / REQ-0045 / REQ-0047: 強制再取得と抑止時間中の操作抑制 -->
+      <section id="controls">
+        <h2>操作</h2>
+        <p class="placeholder">未実装</p>
+      </section>
+    </main>
+  </body>
+</html>
