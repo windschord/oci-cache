@@ -21,6 +21,7 @@ jobs:
   requirements:
     name: 要求の整合性
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

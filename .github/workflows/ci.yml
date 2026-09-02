@@ -20,6 +20,7 @@ jobs:
   lint:
     name: 整形と静的検査
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,6 +46,7 @@ jobs:
   test:
     name: テスト
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,6 +71,7 @@ jobs:
     # なので arm64 のランナーが使え、クロスコンパイル環境を持ち込まずに済む
     name: ビルド (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

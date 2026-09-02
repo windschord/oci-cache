@@ -76,8 +76,13 @@ readonly SERVER_PID=$!
 cleanup() { kill "$SERVER_PID" 2>/dev/null || true; }
 trap cleanup EXIT
 
-for _ in $(seq 1 50); do
-  if curl -fsS -o /dev/null "${ROOT_URL}/v2/"; then
+# 接続はできるが応答が返らない状態で無限に待たないよう、要求ごとと全体の双方に
+# 上限を置く。CI のジョブ上限まで居座られると、Red の理由が分からなくなるため
+ready=0
+readonly READY_DEADLINE=$((SECONDS + 30))
+while [ "$SECONDS" -lt "$READY_DEADLINE" ]; do
+  if curl -fsS --connect-timeout 2 --max-time 5 -o /dev/null "${ROOT_URL}/v2/"; then
+    ready=1
     break
   fi
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -88,7 +93,7 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
-if ! curl -fsS -o /dev/null "${ROOT_URL}/v2/"; then
+if [ "$ready" != 1 ]; then
   echo "${ROOT_URL}/v2/ が応答しません（REQ-0030）。" >&2
   sed 's/^/  | /' "${WORK_DIR}/server.log" >&2
   exit 1
@@ -106,7 +111,8 @@ readonly INDEX_TYPES='application/vnd.oci.image.index.v1+json,application/vnd.do
 #   $1: 参照（タグまたはダイジェスト）
 #   $2: 保存先のパス
 fetch_manifest() {
-  curl -fsS -H "Accept: ${SINGLE_TYPES},${INDEX_TYPES}" -o "$2" \
+  curl -fsS --connect-timeout 5 --max-time 120 \
+    -H "Accept: ${SINGLE_TYPES},${INDEX_TYPES}" -o "$2" \
     "${ROOT_URL}/v2/${NAMESPACE}/manifests/$1"
 }
 
