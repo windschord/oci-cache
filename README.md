@@ -136,7 +136,7 @@ CI は4本に分けてある。
 | ワークフロー | 見るもの |
 |---|---|
 | `req-lint.yml` | 要求レジストリの矛盾と `generated/` の再生成漏れ |
-| `ci.yml` | `cargo fmt` / `cargo clippy` / `cargo test` と、amd64・arm64 双方のビルド（REQ-0050 / 0053） |
+| `ci.yml` | `cargo fmt` / `cargo clippy` / `cargo test`、`Cargo.toml` が宣言する最小 Rust 版で組めるかの確認、amd64・arm64 双方のビルド（REQ-0050 / 0053） |
 | `conformance.yml` | 取得系の仕様準拠（REQ-0030）。**実装が済むまでは全件が落ちる**ので、無関係な PR を止めないよう非阻害にしてある |
 | `release.yml` | タグを起点に両アーキテクチャの配布物を作ってリリースへ添付する（REQ-0053） |
 

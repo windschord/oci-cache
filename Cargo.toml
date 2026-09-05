@@ -2,7 +2,11 @@
 name = "oci-cache"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.85"
+# 依存のうち最も新しい版を要求するのが redb 4.2（1.90）。次いで jsonwebtoken と
+# icu_* が 1.88、idna_adapter が 1.86。ここを下げるには依存を古い版へ固定する
+# 必要があり、redb 4 は索引の前提（README の技術選定）なので下げない。
+# この値が実際に守られているかは ci.yml の msrv ジョブが確かめる
+rust-version = "1.90"
 description = "複数の上流レジストリに対応する、パス透過なプルスルーキャッシュ"
 license = "Apache-2.0"
 repository = "https://github.com/windschord/oci-cache"
