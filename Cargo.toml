@@ -15,7 +15,8 @@ readme = "README.md"
 [dependencies]
 # HTTP サーバ
 axum = { version = "0.8", features = ["http2", "macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal"] }
+# "time" は上流への問い合わせを打ち切るのに使う tokio::time::timeout に要る（REQ-0057 / REQ-0059）
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["trace", "set-header"] }
 hyper = "1"
