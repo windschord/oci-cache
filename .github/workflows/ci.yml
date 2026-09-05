@@ -66,12 +66,24 @@ jobs:
             echo "Cargo.toml に rust-version がありません。" >&2
             exit 1
           fi
+          # この値は Cargo.toml 由来で、fork からの PR でも書き換えられる。
+          # 後段へ渡す前にここで版番号の形だけに絞る。取り違えると
+          # $(...) のような文字列がそのままシェルへ届く
+          if ! printf '%s' "$version" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$'; then
+            echo "rust-version が版番号の形をしていません: ${version}" >&2
+            exit 1
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "宣言された最小 Rust 版: ${version}"
 
+      # 式を run: へ直接書かない。GitHub はシェルが動く前に値を
+      # スクリプトの本文へ埋め込むため、二重引用符で囲んでも
+      # コマンド置換は実行されてしまう。env 経由なら本文は変わらない
       - name: 該当の toolchain の導入
+        env:
+          RUST_VERSION: ${{ steps.msrv.outputs.version }}
         run: |
-          rustup toolchain install "${{ steps.msrv.outputs.version }}" \
+          rustup toolchain install "$RUST_VERSION" \
             --profile minimal --no-self-update
 
       - uses: actions/cache@v4
@@ -86,7 +98,9 @@ jobs:
       # 「その版で組めるか」とは別の話で、ここで見たいのは前者だけ。
       # 依存が宣言より新しい版を要求する場合もここで落ちる（それも宣言の誤り）
       - name: 宣言した版で組めるか
-        run: cargo +${{ steps.msrv.outputs.version }} check --all-targets --locked
+        env:
+          RUST_VERSION: ${{ steps.msrv.outputs.version }}
+        run: cargo "+$RUST_VERSION" check --all-targets --locked
 
   test:
     name: テスト
