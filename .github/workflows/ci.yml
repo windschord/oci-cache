@@ -43,6 +43,51 @@ jobs:
       - name: 静的検査
         run: cargo clippy --all-targets --locked -- -D warnings
 
+  msrv:
+    # Cargo.toml が rust-version を宣言していても、CI がランナー標準の stable で
+    # 組んでいる限り宣言は検証されない。宣言した版で通らないコードが入っても
+    # 気づけず、宣言が実質的に無効になるため、宣言そのものを使って確かめる
+    name: 宣言した最小 Rust 版
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # 版を持つのは Cargo.toml だけにする。ワークフローへ値を書き写すと
+      # 二重管理になり、片方だけ上げたときに検証が意味を失う
+      - name: rust-version の読み出し
+        id: msrv
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "Cargo.toml に rust-version がありません。" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "宣言された最小 Rust 版: ${version}"
+
+      - name: 該当の toolchain の導入
+        run: |
+          rustup toolchain install "${{ steps.msrv.outputs.version }}" \
+            --profile minimal --no-self-update
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+
+      # clippy ではなく check を使う。古い版の clippy が出す指摘は
+      # 「その版で組めるか」とは別の話で、ここで見たいのは前者だけ。
+      # 依存が宣言より新しい版を要求する場合もここで落ちる（それも宣言の誤り）
+      - name: 宣言した版で組めるか
+        run: cargo +${{ steps.msrv.outputs.version }} check --all-targets --locked
+
   test:
     name: テスト
     runs-on: ubuntu-latest

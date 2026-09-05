@@ -52,7 +52,7 @@ push 系のテストは REQ-0031 により意図的に未実装なので skip �
 | ワークフロー | 見るもの |
 |---|---|
 | `req-lint.yml` | 要求レジストリの矛盾と `generated/` の再生成漏れ |
-| `ci.yml` | `fmt` / `clippy` / `test` と amd64・arm64 双方のビルド（REQ-0050 / 0053） |
+| `ci.yml` | `fmt` / `clippy` / `test`、宣言した最小 Rust 版での `check`、amd64・arm64 双方のビルド（REQ-0050 / 0053） |
 | `conformance.yml` | 取得系の仕様準拠（REQ-0030）。当面 Red |
 | `release.yml` | タグを起点に両アーキテクチャの配布物を作る（REQ-0053） |
 
