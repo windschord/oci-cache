@@ -3,6 +3,8 @@
 # 要求は docs/requirements/ の YAML が唯一の正であり、矛盾の検出は人手の
 # レビューではなく reqctl.py に任せる方針を取っている。PR の時点で検査を
 # 通しておかないと、矛盾したまま要求が積み上がって後から解けなくなる。
+#
+# 実装側の検査とビルドは ci.yml が受け持つ。ここは要求だけを見る。
 name: req-lint
 
 on:
@@ -10,8 +12,8 @@ on:
   push:
     branches: [main]
 
-# 検査しかしない。checkout が既定でトークンを Git 設定へ残し、後続の pip と
-# cargo の処理から触れる状態になるため、権限を落としたうえで保持もさせない
+# 検査しかしない。checkout が既定でトークンを Git 設定へ残し、後続の pip の
+# 処理から触れる状態になるため、権限を落としたうえで保持もさせない
 permissions:
   contents: read
 
@@ -19,6 +21,7 @@ jobs:
   requirements:
     name: 要求の整合性
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,28 +50,3 @@ jobs:
             git diff -- docs/requirements/generated
             exit 1
           fi
-
-  lint:
-    name: Rust の整形と静的検査
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: clippy と rustfmt の導入
-        run: rustup component add clippy rustfmt
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-
-      - name: 整形の確認
-        run: cargo fmt --all -- --check
-
-      - name: 静的検査
-        run: cargo clippy --all-targets -- -D warnings

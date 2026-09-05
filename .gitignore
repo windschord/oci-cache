@@ -1,0 +1,12 @@
+# ビルド成果物
+/target
+
+# 実行時に作られる保存領域と索引（config.example.toml の既定値）
+/data
+
+# 設定の実体は配備先ごとに異なり、認証情報も含みうるため追跡しない。
+# 雛形は config.example.toml を参照すること
+/config.toml
+
+# conformance スイートの取得先と生成物（scripts/conformance.sh が作る）
+/.conformance/

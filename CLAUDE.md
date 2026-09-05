@@ -45,6 +45,19 @@ python3 scripts/reqctl.py next-id req         # 採番
 
 push 系のテストは REQ-0031 により意図的に未実装なので skip 設定で落とす。skip するのは上流の conformance スイートが持つ push 系テストだけで、書き込み系エンドポイントが返す応答（REQ-0036 の HTTP 405）は自前の `tests/conformance.rs::push_request_is_rejected_as_not_allowed` で検証する。
 
+実行手順は `scripts/conformance.sh` にある。上流スイートは既定では push でテスト対象を用意するので、代わりに1つ取得してキャッシュを温め、その結果のダイジェストを `OCI_MANIFEST_DIGEST` / `OCI_BLOB_DIGEST` として渡している。CI は `.github/workflows/conformance.yml`。実装が済むまで全件落ちるため、無関係な PR を止めないよう `continue-on-error` を付けてある。**取得系が通るようになったらこの行を外すこと。**
+
+### CI の分担
+
+| ワークフロー | 見るもの |
+|---|---|
+| `req-lint.yml` | 要求レジストリの矛盾と `generated/` の再生成漏れ |
+| `ci.yml` | `fmt` / `clippy` / `test` と amd64・arm64 双方のビルド（REQ-0050 / 0053） |
+| `conformance.yml` | 取得系の仕様準拠（REQ-0030）。当面 Red |
+| `release.yml` | タグを起点に両アーキテクチャの配布物を作る（REQ-0053） |
+
+検証手段が `review` の要求（REQ-0050 / 0053 / 0055）の確認手順は `docs/verification/review.md` にある。設計書ではないので、この文書は作ってよい。
+
 ### 順序
 
 1. **ルーティング解決** — REQ-0001 / 0002 / 0003 / 0007 / 0009 / 0056 〜 0059

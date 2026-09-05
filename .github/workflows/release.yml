@@ -1,0 +1,129 @@
+# 配布物の生成
+#
+# linux/arm64 と linux/amd64 の双方で動く実行ファイルを提供すること自体が
+# 要求（REQ-0053）であり、配布は単一の実行ファイルで完結する（REQ-0050）。
+# 公開リポジトリなので arm64 のランナーがそのまま使え、クロスコンパイルの
+# 仕組みを持ち込まずに実機と同じ組み合わせで組める。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # タグを打つ前に両アーキテクチャで組めることだけ確かめたいときのため
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ビルド (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: リリースビルド
+        run: cargo build --release --locked
+
+      # 実行ファイル1つと、動かすのに要る最低限の文書だけを固める。
+      # 外部データベースも常駐プロセスも同梱しない（REQ-0050）
+      - name: 成果物の作成
+        id: package
+        run: |
+          set -euo pipefail
+          name="oci-cache-linux-${{ matrix.arch }}"
+          mkdir -p "dist/${name}"
+          cp target/release/oci-cache "dist/${name}/"
+          cp README.md LICENSE config.example.toml "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      # 起動しない実行ファイルを配布しない。ビルドが通ったことと、配布物として
+      # 使えることは別で、conformance を非阻害にしている間はなおさら、ここで
+      # 止めないと動かない成果物がリリースへ出てしまう（REQ-0050）
+      # 起動しない実行ファイルを配布しない。ビルドが通ったことと、配布物として
+      # 使えることは別で、conformance を非阻害にしている間はなおさら、ここで
+      # 止めないと動かない成果物がリリースへ出てしまう（REQ-0050）
+      - name: 成果物の起動確認
+        run: |
+          set -euo pipefail
+          name="${{ steps.package.outputs.name }}"
+          work="$(mktemp -d)"
+          tar -C "$work" -xzf "dist/${name}.tar.gz"
+          cd "${work}/${name}"
+
+          # 同梱した雛形をそのまま使う。利用者が最初に踏む手順と同じにすることで、
+          # config.example.toml 自体が配布物として使える状態かも同時に見る
+          cp config.example.toml config.toml
+          ./oci-cache --config config.toml > server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+
+          # 接続はできるが応答が返らない状態で無限に待たないよう、要求ごとと
+          # 全体の双方に上限を置く。上限に達したら「起動しない」として扱う
+          ok=0
+          deadline=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if curl -fsS --connect-timeout 2 --max-time 5 -o /dev/null http://127.0.0.1:5000/v2/; then
+              ok=1
+              break
+            fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+          done
+
+          if [ "$ok" != 1 ]; then
+            echo "配布物が起動しませんでした。この状態でリリースへ添付しない。" >&2
+            sed 's/^/  | /' server.log >&2
+            exit 1
+          fi
+          echo "同梱の config.example.toml で起動し、/v2/ が応答することを確認しました。"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: リリースへの添付
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: リリースの作成と添付
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --generate-notes
+          fi
+          gh release upload "$tag" dist/* --clobber
