@@ -36,6 +36,9 @@ pub struct Router<P, M> {
     config: RoutingConfig,
     probe: P,
     memo: M,
+    /// `memo` に書き込む際に添える世代番号。古い `Router` が再読み込み後に
+    /// 古い順序の結果を書き戻すのを防ぐために使う（`RoutingMemoStore` 参照）。
+    generation: u64,
 }
 
 impl<P, M> Router<P, M>
@@ -52,10 +55,12 @@ where
             memo.clear_all();
             memo.set_order_fingerprint(&fingerprint);
         }
+        let generation = memo.generation();
         Self {
             config,
             probe,
             memo,
+            generation,
         }
     }
 
@@ -116,17 +121,30 @@ where
 
     /// 設定順序で問い合わせ、最初に成功した上流を採用する。応答しない上流は
     /// REQ-0057 により失敗として扱い、次の上流へ進める。
+    ///
+    /// 到達不能な上流が1件でもあれば、不存在を確認できていないので
+    /// `NotFoundOnAnyUpstream` ではなく `Unreachable` を返す。
     async fn resolve_via_fallback(&self, repository: &str) -> Result<Resolution, RoutingError> {
+        let mut unreachable_upstream: Option<String> = None;
         for upstream in &self.config.upstreams {
-            if self.probe_with_timeout(upstream, repository).await == ProbeOutcome::Found {
-                self.memo.put(repository, &upstream.id); // REQ-0003
-                return Ok(Resolution {
-                    upstream: upstream.id.clone(),
-                    source: ResolutionSource::Fallback,
-                });
+            match self.probe_with_timeout(upstream, repository).await {
+                ProbeOutcome::Found => {
+                    self.memo.put(repository, &upstream.id, self.generation); // REQ-0003
+                    return Ok(Resolution {
+                        upstream: upstream.id.clone(),
+                        source: ResolutionSource::Fallback,
+                    });
+                }
+                ProbeOutcome::Unreachable => {
+                    unreachable_upstream.get_or_insert_with(|| upstream.id.clone());
+                }
+                ProbeOutcome::NotFound => {}
             }
         }
-        Err(RoutingError::NotFoundOnAnyUpstream)
+        match unreachable_upstream {
+            Some(id) => Err(RoutingError::Unreachable(id)),
+            None => Err(RoutingError::NotFoundOnAnyUpstream),
+        }
     }
 
     async fn probe_with_timeout(&self, upstream: &Upstream, repository: &str) -> ProbeOutcome {

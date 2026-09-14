@@ -10,10 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oci_cache::routing::{
-    HttpUpstreamProbe, InMemoryRoutingMemo, ResolutionSource, Router, RoutingConfig, Upstream,
+    HttpUpstreamProbe, InMemoryRoutingMemo, ProbeOutcome, ResolutionSource, Router, RoutingConfig,
+    RoutingError, RoutingMemoStore, Upstream, UpstreamProbe,
 };
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 async fn spawn_upstream(id: &str) -> (Upstream, MockServer) {
     let server = MockServer::start().await;
@@ -281,4 +282,139 @@ fn upstream_probe_timeout_default_is_5_seconds() {
         RoutingConfig::default().probe_timeout,
         Duration::from_secs(5)
     );
+}
+
+/// 到達不能な上流が1件でもあれば「すべての上流で不存在」とは報告しない
+/// （CodeRabbit レビュー指摘: Unreachable と NotFound の混同）。
+#[tokio::test]
+async fn fallback_reports_unreachable_when_some_upstream_times_out() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, ghcr_server) = spawn_upstream("ghcr.io").await;
+    let repo = "library/nginx";
+    register_delayed_found(&docker_server, repo, Duration::from_millis(200)).await;
+    register_not_found(&ghcr_server, repo).await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker, ghcr],
+        probe_timeout: Duration::from_millis(50),
+    };
+    let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
+
+    let error = router.resolve(repo, None).await.unwrap_err();
+
+    assert!(matches!(error, RoutingError::Unreachable(_)));
+}
+
+/// すべての上流が明確に不存在を返した時だけ「不存在」を報告する。
+#[tokio::test]
+async fn fallback_reports_not_found_when_all_upstreams_miss() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, ghcr_server) = spawn_upstream("ghcr.io").await;
+    let repo = "library/nginx";
+    register_not_found(&docker_server, repo).await;
+    register_not_found(&ghcr_server, repo).await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker, ghcr],
+        probe_timeout: Duration::from_secs(5),
+    };
+    let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
+
+    let error = router.resolve(repo, None).await.unwrap_err();
+
+    assert!(matches!(error, RoutingError::NotFoundOnAnyUpstream));
+}
+
+/// 設定再読み込み中（新しい `Router` が作られた後）に、探索を続けていた古い
+/// `Router` の結果がメモへ書き戻らないことを確かめる
+/// （CodeRabbit レビュー指摘: 世代をまたいだ書き込みのレース）。
+#[tokio::test]
+async fn routing_memo_rejects_write_from_stale_generation() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, _ghcr_server) = spawn_upstream("ghcr.io").await;
+    let repo = "library/nginx";
+    // 旧 Router の探索を長引かせ、その間に設定の再読み込みを起こす
+    register_delayed_found(&docker_server, repo, Duration::from_millis(150)).await;
+
+    let memo = Arc::new(InMemoryRoutingMemo::default());
+
+    let config_a = RoutingConfig {
+        upstreams: vec![docker.clone(), ghcr.clone()],
+        probe_timeout: Duration::from_secs(5),
+    };
+    let router_a = Router::new(config_a, probe(), memo.clone());
+
+    // 旧 Router の解決を開始するが、まだ完了させない
+    let stale_resolution = tokio::spawn({
+        let repo = repo.to_string();
+        async move { router_a.resolve(&repo, None).await }
+    });
+
+    // 旧 Router がまだ探索中のうちに、設定順序を変えて Router を作り直す
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let config_b = RoutingConfig {
+        upstreams: vec![ghcr, docker],
+        probe_timeout: Duration::from_secs(5),
+    };
+    let _router_b = Router::new(config_b, probe(), memo.clone());
+
+    // 旧 Router の探索自体は成功するが、もう有効でない世代の書き込みは
+    // 反映されない
+    let stale_result = stale_resolution.await.unwrap().unwrap();
+    assert_eq!(stale_result.upstream, "docker.io");
+    assert!(memo.get(repo).is_none());
+}
+
+struct MissingAuthorizationHeader;
+
+impl wiremock::Match for MissingAuthorizationHeader {
+    fn matches(&self, request: &Request) -> bool {
+        !request.headers.contains_key("authorization")
+    }
+}
+
+/// 401 に対して `WWW-Authenticate` の Bearer challenge を解決し、トークンを
+/// 使って再試行する。docker.io は匿名 pull でもこの手順を要求するため、これが
+/// 無いと既定の最優先上流（docker.io）が実質的に機能しない
+/// （CodeRabbit レビュー指摘）。
+#[tokio::test]
+async fn probe_retries_after_bearer_challenge() {
+    let server = MockServer::start().await;
+    let repo = "library/nginx";
+    let realm = format!("{}/token", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/tags/list")))
+        .and(MissingAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(
+                r#"Bearer realm="{realm}",service="registry.docker.io",scope="repository:{repo}:pull""#
+            ),
+        ))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": "test-token",
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/tags/list")))
+        .and(header("authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": repo,
+            "tags": [],
+        })))
+        .mount(&server)
+        .await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let outcome = probe().probe(&upstream, repo).await;
+
+    assert_eq!(outcome, ProbeOutcome::Found);
 }
