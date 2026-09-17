@@ -1,5 +1,6 @@
 use std::future::Future;
 
+use reqwest::Url;
 use serde::Deserialize;
 
 use super::config::Upstream;
@@ -32,11 +33,23 @@ pub trait UpstreamProbe: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct HttpUpstreamProbe {
     client: reqwest::Client,
+    /// トークン取得専用のクライアント。リダイレクトを追わない設定にして
+    /// いる。`realm` の信頼はホスト名の一致で判定しているが、応答が
+    /// リダイレクトを返す場合はその判定をすり抜けてしまうため
+    /// （SSRF 対策）。
+    token_client: reqwest::Client,
 }
 
 impl HttpUpstreamProbe {
     pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+        let token_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_else(|_| client.clone());
+        Self {
+            client,
+            token_client,
+        }
     }
 
     /// 401 に Bearer challenge が付いていれば、トークンを取得して1回だけ
@@ -44,10 +57,11 @@ impl HttpUpstreamProbe {
     /// 無いと既定の最優先上流（docker.io）が実質的に機能しない。
     async fn probe_with_bearer_retry(
         &self,
+        upstream: &Upstream,
         url: &str,
         challenge: &BearerChallenge,
     ) -> ProbeOutcome {
-        let Some(token) = self.fetch_bearer_token(challenge).await else {
+        let Some(token) = self.fetch_bearer_token(upstream, challenge).await else {
             return ProbeOutcome::Unreachable;
         };
         match self.client.get(url).bearer_auth(token).send().await {
@@ -56,7 +70,15 @@ impl HttpUpstreamProbe {
         }
     }
 
-    async fn fetch_bearer_token(&self, challenge: &BearerChallenge) -> Option<String> {
+    async fn fetch_bearer_token(
+        &self,
+        upstream: &Upstream,
+        challenge: &BearerChallenge,
+    ) -> Option<String> {
+        if !realm_is_trusted(upstream, &challenge.realm) {
+            // 設定した上流以外へリクエストさせられるのを防ぐ（SSRF 対策）
+            return None;
+        }
         let mut query = Vec::new();
         if let Some(service) = &challenge.service {
             query.push(("service", service.as_str()));
@@ -65,7 +87,7 @@ impl HttpUpstreamProbe {
             query.push(("scope", scope.as_str()));
         }
         let response = self
-            .client
+            .token_client
             .get(&challenge.realm)
             .query(&query)
             .send()
@@ -95,12 +117,45 @@ impl UpstreamProbe for HttpUpstreamProbe {
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_bearer_challenge);
             return match challenge {
-                Some(challenge) => self.probe_with_bearer_retry(&url, &challenge).await,
+                Some(challenge) => {
+                    self.probe_with_bearer_retry(upstream, &url, &challenge)
+                        .await
+                }
                 None => ProbeOutcome::Unreachable,
             };
         }
 
         outcome_from_status(response.status())
+    }
+}
+
+/// `realm` が、この上流について信頼してよいトークン発行元かを判定する。
+///
+/// スキームは `base_url` と一致させる。`upstream.token_host` が明示されて
+/// いればそのホストと一致するかだけを見る（ポートは問わない。運用者が
+/// 明示的に指定した発行元なので、標準ポートを使う前提で足りる）。
+/// 明示が無ければ `base_url` と同一のホスト・ポートに限定する。ポートまで
+/// 見ないと、例えば同一ホスト上の別ポートで動く別サービスへ誘導される
+/// 攻撃を防げない。上流が返す `realm` を無条件に信頼すると、悪意ある
+/// （または乗っ取られた）上流の設定1つでこのサーバーに任意の宛先へ
+/// リクエストさせられてしまう（SSRF）。
+fn realm_is_trusted(upstream: &Upstream, realm: &str) -> bool {
+    let Ok(base) = Url::parse(&upstream.base_url) else {
+        return false;
+    };
+    let Ok(realm_url) = Url::parse(realm) else {
+        return false;
+    };
+    if realm_url.scheme() != base.scheme() {
+        return false;
+    }
+    match &upstream.token_host {
+        Some(token_host) => realm_url.host_str() == Some(token_host.as_str()),
+        None => {
+            realm_url.host_str().is_some()
+                && realm_url.host_str() == base.host_str()
+                && realm_url.port_or_known_default() == base.port_or_known_default()
+        }
     }
 }
 

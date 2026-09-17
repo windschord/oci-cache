@@ -418,3 +418,95 @@ async fn probe_retries_after_bearer_challenge() {
 
     assert_eq!(outcome, ProbeOutcome::Found);
 }
+
+/// `WWW-Authenticate` の `realm` が上流の設定（`base_url` / `token_host`）と
+/// 異なるホストを指す場合、トークンを取得せず `Unreachable` として扱う
+/// （CodeRabbit レビュー指摘: 上流が返す `realm` を無条件に信頼すると、
+/// 設定した上流1つが悪意を持つだけでこのサーバーに任意のホストへ
+/// リクエストさせられる SSRF になる）。
+#[tokio::test]
+async fn probe_rejects_bearer_realm_with_untrusted_host() {
+    let server = MockServer::start().await;
+    let attacker = MockServer::start().await;
+    let repo = "library/nginx";
+    let forged_realm = format!("{}/token", attacker.uri());
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/tags/list")))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(
+                r#"Bearer realm="{forged_realm}",service="registry.docker.io",scope="repository:{repo}:pull""#
+            ),
+        ))
+        .mount(&server)
+        .await;
+
+    // 攻撃者側のトークンエンドポイントが呼ばれたかどうかを確かめられるよう
+    // 応答は用意しておく
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": "stolen-token",
+        })))
+        .mount(&attacker)
+        .await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let outcome = probe().probe(&upstream, repo).await;
+
+    assert_eq!(outcome, ProbeOutcome::Unreachable);
+    assert!(attacker.received_requests().await.unwrap().is_empty());
+}
+
+/// `activate_order` は指紋が変わるたびに世代を進め、同じ指紋の再呼び出しでは
+/// 進めない。
+#[test]
+fn activate_order_increments_generation_for_distinct_fingerprints() {
+    let memo = InMemoryRoutingMemo::default();
+
+    let g1 = memo.activate_order("docker.io\u{0}ghcr.io");
+    let g2 = memo.activate_order("docker.io\u{0}ghcr.io");
+    let g3 = memo.activate_order("ghcr.io\u{0}docker.io");
+
+    assert_eq!(g1, g2);
+    assert_ne!(g2, g3);
+}
+
+/// `activate_order` を異なる指紋で並行に呼び出しても、返る世代番号が
+/// 衝突しない（CodeRabbit レビュー指摘: 指紋の比較・消去・採番を別々の
+/// 呼び出しに分けていた旧実装は、異なる設定順序で `Router::new` が並行に
+/// 呼ばれた際、互いの消去より前に指紋比較が行われることで同じ世代を
+/// 採番しうる欠陥があった。`std::sync::Barrier` で複数スレッドの呼び出し
+/// 開始を揃え、この欠陥が再現する条件を強制的に作る）。
+#[test]
+fn concurrent_activate_order_calls_yield_distinct_generations() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let memo = Arc::new(InMemoryRoutingMemo::default());
+    let fingerprints = ["a\u{0}b", "b\u{0}a", "a\u{0}b\u{0}c", "c\u{0}b\u{0}a"];
+    let barrier = Arc::new(Barrier::new(fingerprints.len()));
+
+    let handles: Vec<_> = fingerprints
+        .iter()
+        .map(|fingerprint| {
+            let memo = memo.clone();
+            let barrier = barrier.clone();
+            let fingerprint = fingerprint.to_string();
+            thread::spawn(move || {
+                barrier.wait();
+                memo.activate_order(&fingerprint)
+            })
+        })
+        .collect();
+
+    let mut generations: Vec<u64> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    generations.sort_unstable();
+    generations.dedup();
+
+    assert_eq!(generations.len(), fingerprints.len());
+}

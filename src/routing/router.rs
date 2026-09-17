@@ -22,7 +22,7 @@ pub struct Resolution {
 pub enum RoutingError {
     #[error("名前空間ヒントが示す上流レジストリ '{0}' は設定されていません")]
     UnknownUpstream(String),
-    #[error("上流レジストリ '{0}' への問い合わせが待ち時間内に完了しませんでした")]
+    #[error("上流レジストリ '{0}' への問い合わせに失敗しました")]
     Unreachable(String),
     #[error("設定されたすべての上流レジストリでリポジトリ参照が見つかりませんでした")]
     NotFoundOnAnyUpstream,
@@ -51,11 +51,7 @@ where
     /// ある上流を返す」が新しい順序の下では満たされなくなる。
     pub fn new(config: RoutingConfig, probe: P, memo: M) -> Self {
         let fingerprint = order_fingerprint(&config.upstreams);
-        if memo.order_fingerprint().as_deref() != Some(fingerprint.as_str()) {
-            memo.clear_all();
-            memo.set_order_fingerprint(&fingerprint);
-        }
-        let generation = memo.generation();
+        let generation = memo.activate_order(&fingerprint);
         Self {
             config,
             probe,

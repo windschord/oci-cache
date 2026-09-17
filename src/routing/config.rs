@@ -11,6 +11,15 @@ use std::time::Duration;
 pub struct Upstream {
     pub id: String,
     pub base_url: String,
+    /// Bearer トークン取得先（`realm`）として信頼するホスト名。
+    ///
+    /// 未設定なら `base_url` 自身のホストを信頼する。docker.io のように
+    /// トークン発行元（`auth.docker.io`）が registry 本体
+    /// （`registry-1.docker.io`）と異なるホストの場合に指定する。これが
+    /// 無いと、応答に含まれる `realm` を無条件に信頼することになり、
+    /// 設定した上流が悪意を持てば任意のホストへリクエストさせられてしまう
+    /// （SSRF）。
+    pub token_host: Option<String>,
 }
 
 impl Upstream {
@@ -18,7 +27,13 @@ impl Upstream {
         Self {
             id: id.into(),
             base_url: base_url.into(),
+            token_host: None,
         }
+    }
+
+    pub fn with_token_host(mut self, token_host: impl Into<String>) -> Self {
+        self.token_host = Some(token_host.into());
+        self
     }
 }
 
@@ -43,7 +58,8 @@ impl Default for RoutingConfig {
         Self {
             // REQ-0008: 初期対応する上流レジストリ
             upstreams: vec![
-                Upstream::new("docker.io", "https://registry-1.docker.io"),
+                Upstream::new("docker.io", "https://registry-1.docker.io")
+                    .with_token_host("auth.docker.io"),
                 Upstream::new("ghcr.io", "https://ghcr.io"),
                 Upstream::new("quay.io", "https://quay.io"),
             ],
