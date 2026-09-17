@@ -45,7 +45,11 @@ impl HttpUpstreamProbe {
         let token_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_else(|_| client.clone());
+            // リダイレクトを追う `client` へフォールバックすると、SSRF対策の
+            // 前提（トークン取得はリダイレクトを追わない）が崩れる。既定設定
+            // からのビルドが失敗するのは環境自体が壊れている場合のみなので、
+            // 黙って迂回させず起動時に失敗させる。
+            .expect("トークン取得専用の reqwest クライアントの構築に失敗しました");
         Self {
             client,
             token_client,
