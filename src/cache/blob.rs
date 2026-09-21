@@ -11,6 +11,7 @@ use oci_client::secrets::RegistryAuth;
 use oci_client::{Reference, RegistryOperation};
 use tokio::io::AsyncWrite;
 
+use crate::registry_auth;
 use crate::routing::Upstream;
 
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +20,14 @@ pub enum BlobFetchError {
     InvalidDigest(String),
     #[error("上流レジストリの URL '{0}' を解釈できません")]
     InvalidUpstreamUrl(String),
+    #[error("上流レジストリ '{upstream}' の認証方式の確認に失敗しました")]
+    AuthProbe {
+        upstream: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("上流レジストリ '{upstream}' が要求するトークン発行元 '{realm}' を信頼できません")]
+    UntrustedRealm { upstream: String, realm: String },
     #[error("上流レジストリ '{upstream}' への認証に失敗しました")]
     Auth {
         upstream: String,
@@ -59,12 +68,19 @@ pub trait BlobSource: Send + Sync {
 /// 必要になる docker.io のトークン取得を毎回やり直すことになる。
 pub struct OciBlobSource {
     clients: Mutex<HashMap<String, Client>>,
+    /// 認証方式の確認（`GET /v2/`）専用のクライアント。
+    probe_client: reqwest::Client,
+    /// トークン取得専用のクライアント（SSRF 対策）。詳細は
+    /// `registry_auth::new_token_client` を参照。
+    token_client: reqwest::Client,
 }
 
 impl OciBlobSource {
     pub fn new() -> Self {
         Self {
             clients: Mutex::new(HashMap::new()),
+            probe_client: reqwest::Client::new(),
+            token_client: registry_auth::new_token_client(),
         }
     }
 
@@ -83,6 +99,47 @@ impl OciBlobSource {
             }
         };
         Ok((client, registry))
+    }
+
+    /// 上流が要求する認証方式を確認する。
+    ///
+    /// `oci_client::Client::auth` は `WWW-Authenticate` の `realm` を検証
+    /// せずに使う（`RegistryAuth::Anonymous` / `Basic` を渡した場合、
+    /// challenge が示す `realm` へ無条件にトークンを取りに行く）ため、
+    /// ここで `registry_auth::realm_is_trusted` による検証を済ませてから
+    /// `RegistryAuth::Bearer` として渡す。これにより `oci_client` 内部が
+    /// 未検証の `realm` へリクエストする経路（SSRF）を経由しない。
+    async fn resolve_auth(
+        &self,
+        upstream: &Upstream,
+        repository: &str,
+    ) -> Result<RegistryAuth, BlobFetchError> {
+        let url = format!("{}/v2/", upstream.base_url);
+        let response = self.probe_client.get(&url).send().await.map_err(|source| {
+            BlobFetchError::AuthProbe {
+                upstream: upstream.id.clone(),
+                source,
+            }
+        })?;
+        let challenge = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(registry_auth::parse_bearer_challenge);
+        let Some(mut challenge) = challenge else {
+            return Ok(RegistryAuth::Anonymous);
+        };
+        // `/v2/` への一般的な問い合わせなので challenge 自体には scope が
+        // 含まれない。この blob が属するリポジトリの pull 権限を明示する
+        // (oci_client 自身も challenge の scope は使わず、こう組み立てる)
+        challenge.scope = Some(format!("repository:{repository}:pull"));
+        let token = registry_auth::fetch_bearer_token(&self.token_client, upstream, &challenge)
+            .await
+            .ok_or_else(|| BlobFetchError::UntrustedRealm {
+                upstream: upstream.id.clone(),
+                realm: challenge.realm.clone(),
+            })?;
+        Ok(RegistryAuth::Bearer(token))
     }
 }
 
@@ -105,16 +162,13 @@ impl BlobSource for OciBlobSource {
     {
         use tokio::io::AsyncWriteExt;
 
+        let auth = self.resolve_auth(upstream, repository).await?;
         let (client, registry) = self.client_and_registry(upstream)?;
         let reference =
             Reference::with_digest(registry, repository.to_string(), digest.to_string());
 
         client
-            .auth(
-                &reference,
-                &RegistryAuth::Anonymous,
-                RegistryOperation::Pull,
-            )
+            .auth(&reference, &auth, RegistryOperation::Pull)
             .await
             .map_err(|source| BlobFetchError::Auth {
                 upstream: upstream.id.clone(),
@@ -134,6 +188,11 @@ impl BlobSource for OciBlobSource {
             let chunk = chunk.map_err(BlobFetchError::Io)?;
             writer.write_all(&chunk).await.map_err(BlobFetchError::Io)?;
         }
+        // tokio::fs::File はバックグラウンドのブロッキングタスクへ書き込みを
+        // 委ねるため、flush するまで実際にディスクへ書き終える保証が無い。
+        // これを省くと、書き終わっていない一時ファイルを rename してしまう
+        // (不完全な内容を保存済みとして扱う) おそれがある。
+        writer.flush().await.map_err(BlobFetchError::Io)?;
         Ok(())
     }
 }
@@ -153,6 +212,33 @@ fn parse_upstream_url(base_url: &str) -> Result<(String, ClientProtocol), BlobFe
     }
 }
 
+/// 一時ファイル名の重複排除に使う、プロセス内で共有する連番。
+///
+/// 同じ `root` を指す `BlobCache` が複数存在しても（`BlobCache::new` は
+/// これを禁止していない）一時ファイル名が衝突しないよう、インスタンスでは
+/// なくプロセスで共有する。それでも理論上の衝突（他プロセスが同じ名前を
+/// 使う等）に備え、実際の予約は `create_new` で行い、失敗したら
+/// 採番をやり直す。
+static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
+
+/// `path` を書き込み先として、まだ存在しない一時ファイルを予約して開く。
+async fn create_unique_tmp_file(path: &Path) -> Result<(PathBuf, tokio::fs::File), BlobFetchError> {
+    loop {
+        let n = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = path.with_extension(format!("tmp.{}.{n}", std::process::id()));
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+            .await
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(BlobFetchError::Io(err)),
+        }
+    }
+}
+
 /// ダイジェストを鍵とした blob の保存（REQ-0010）。
 ///
 /// 保存先は OCI Image Layout に沿った `<root>/blobs/<algorithm>/<hex>`
@@ -161,10 +247,6 @@ fn parse_upstream_url(base_url: &str) -> Result<(String, ClientProtocol), BlobFe
 pub struct BlobCache<S> {
     root: PathBuf,
     source: S,
-    /// 一時ファイル名の重複を避けるための連番。同一ダイジェストへの並行な
-    /// 要求が同じ一時ファイルに書き込んで内容が混ざるのを防ぐ（在庫が無い
-    /// 場合の重複取得そのものは、この段階では避けない）。
-    tmp_counter: AtomicU64,
 }
 
 impl<S> BlobCache<S>
@@ -175,7 +257,6 @@ where
         Self {
             root: root.into(),
             source,
-            tmp_counter: AtomicU64::new(0),
         }
     }
 
@@ -201,9 +282,10 @@ where
                 .map_err(BlobFetchError::Io)?;
         }
 
-        let tmp_path = self.tmp_path(&path);
+        let (tmp_path, file) = create_unique_tmp_file(&path).await?;
         if let Err(err) = self
-            .fetch_to_tmp(upstream, repository, digest, &tmp_path)
+            .source
+            .fetch_into(upstream, repository, digest, file)
             .await
         {
             let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -213,26 +295,6 @@ where
             .await
             .map_err(BlobFetchError::Io)?;
         Ok(path)
-    }
-
-    async fn fetch_to_tmp(
-        &self,
-        upstream: &Upstream,
-        repository: &str,
-        digest: &str,
-        tmp_path: &Path,
-    ) -> Result<(), BlobFetchError> {
-        let file = tokio::fs::File::create(tmp_path)
-            .await
-            .map_err(BlobFetchError::Io)?;
-        self.source
-            .fetch_into(upstream, repository, digest, file)
-            .await
-    }
-
-    fn tmp_path(&self, path: &Path) -> PathBuf {
-        let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
-        path.with_extension(format!("tmp.{n}"))
     }
 
     fn blob_path(&self, digest: &str) -> Result<PathBuf, BlobFetchError> {
