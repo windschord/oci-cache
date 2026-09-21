@@ -7,7 +7,10 @@
 //! 上流レジストリは wiremock でモックし、`GET /v2/<repository>/blobs/<digest>`
 //! への応答を blob 本体として扱う。
 
-use oci_cache::cache::{BlobCache, OciBlobSource};
+use std::sync::Arc;
+use std::time::Duration;
+
+use oci_cache::cache::{BlobCache, BlobSource, OciBlobSource};
 use oci_cache::routing::Upstream;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -162,4 +165,103 @@ async fn blob_fetch_rejects_bearer_realm_with_untrusted_host() {
 
     assert!(result.is_err());
     assert!(attacker.received_requests().await.unwrap().is_empty());
+}
+
+/// 同一ダイジェストへの並行な要求は、最初の1件だけが実際に上流へ
+/// 問い合わせ、残りはその完了を待って保存済みの内容を返す。無ければ
+/// 未保存の同じ blob への同時要求がそれぞれ独立に取得してしまい、帯域と
+/// 上流の要求回数制限を無駄に消費する。
+#[tokio::test]
+async fn concurrent_requests_for_same_digest_are_coalesced() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let content = b"coalesced blob content".to_vec();
+    let digest = digest_of(&content);
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/blobs/{digest}")))
+        .respond_with(
+            // 並行に来た要求が確実に「取得中」のタイミングで重なるよう、
+            // 応答を少し遅らせる
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(200))
+                .set_body_bytes(content.clone()),
+        )
+        .mount(&server)
+        .await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let cache = Arc::new(BlobCache::new(store_dir.path(), OciBlobSource::new()));
+
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let cache = Arc::clone(&cache);
+            let upstream = upstream.clone();
+            let digest = digest.clone();
+            tokio::spawn(async move { cache.get(&upstream, repository, &digest).await })
+        })
+        .collect();
+
+    for handle in handles {
+        let path = handle.await.unwrap().unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), content);
+    }
+
+    let blob_path = format!("/v2/{repository}/blobs/{digest}");
+    let blob_requests = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path() == blob_path)
+        .count();
+    assert_eq!(blob_requests, 1);
+}
+
+async fn fetch_to_temp_file(
+    source: &OciBlobSource,
+    upstream: &Upstream,
+    repository: &str,
+    digest: &str,
+) -> Vec<u8> {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("out");
+    let file = tokio::fs::File::create(&path).await.unwrap();
+    source
+        .fetch_into(upstream, repository, digest, file)
+        .await
+        .unwrap();
+    tokio::fs::read(&path).await.unwrap()
+}
+
+/// 匿名上流（`WWW-Authenticate` challenge を返さない）で複数回 blob を
+/// 取得しても、認証方式の確認（`GET /v2/`）は初回の1回だけで済む。
+#[tokio::test]
+async fn repeated_fetch_reuses_cached_auth_shape_for_anonymous_upstream() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let first = b"first blob".to_vec();
+    let second = b"second blob".to_vec();
+    let first_digest = digest_of(&first);
+    let second_digest = digest_of(&second);
+    register_blob(&server, repository, &first_digest, &first).await;
+    register_blob(&server, repository, &second_digest, &second).await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let source = OciBlobSource::new();
+
+    let out1 = fetch_to_temp_file(&source, &upstream, repository, &first_digest).await;
+    assert_eq!(out1, first);
+    let out2 = fetch_to_temp_file(&source, &upstream, repository, &second_digest).await;
+    assert_eq!(out2, second);
+
+    let v2_requests = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path() == "/v2/")
+        .count();
+    assert_eq!(v2_requests, 1);
 }
