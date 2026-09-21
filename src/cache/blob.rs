@@ -26,6 +26,10 @@ pub enum BlobFetchError {
         #[source]
         source: reqwest::Error,
     },
+    #[error(
+        "上流レジストリ '{upstream}' の認証方式の確認で予期しない応答（HTTP {status}）を受け取りました"
+    )]
+    UnexpectedAuthProbeStatus { upstream: String, status: u16 },
     #[error("上流レジストリ '{upstream}' が要求するトークン発行元 '{realm}' を信頼できません")]
     UntrustedRealm { upstream: String, realm: String },
     #[error("上流レジストリ '{upstream}' への認証に失敗しました")]
@@ -85,7 +89,11 @@ pub struct OciBlobSource {
     /// 初回確認時に済んでいるため、以降は `GET /v2/` への再問い合わせを
     /// 省略できる。
     auth_shapes: Mutex<HashMap<String, AuthShape>>,
-    /// 認証方式の確認（`GET /v2/`）専用のクライアント。
+    /// 認証方式の確認（`GET /v2/`）専用のクライアント。設定済みの
+    /// `Upstream.base_url` へ問い合わせるとはいえ、応答がリダイレクトを
+    /// 返す場合に無条件で追従すると、悪意ある（または乗っ取られた）上流の
+    /// 設定1つで任意の宛先へリクエストさせられる（SSRF）ため、
+    /// `token_client` と同様にリダイレクトを追わない。
     probe_client: reqwest::Client,
     /// トークン取得専用のクライアント（SSRF 対策）。詳細は
     /// `registry_auth::new_token_client` を参照。
@@ -97,7 +105,7 @@ impl OciBlobSource {
         Self {
             clients: Mutex::new(HashMap::new()),
             auth_shapes: Mutex::new(HashMap::new()),
-            probe_client: reqwest::Client::new(),
+            probe_client: registry_auth::new_token_client(),
             token_client: registry_auth::new_token_client(),
         }
     }
@@ -137,17 +145,38 @@ impl OciBlobSource {
                 source,
             }
         })?;
-        let challenge = response
-            .headers()
-            .get(reqwest::header::WWW_AUTHENTICATE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(registry_auth::parse_bearer_challenge);
-        let shape = match challenge {
-            None => AuthShape::Anonymous,
-            Some(challenge) => AuthShape::Bearer {
-                realm: challenge.realm,
-                service: challenge.service,
-            },
+        let status = response.status();
+        // 成功応答だけを匿名と見なし、401 は有効な Bearer challenge が
+        // 付いている場合に限って扱う。5xx・429・リダイレクトやパース不能な
+        // 401 まで匿名として記録すると、上流が一時的に不調なだけで
+        // 「この上流は匿名で取得できる」という誤った判定を `OciBlobSource`
+        // の寿命いっぱいキャッシュしてしまい、以降の取得が401で失敗し
+        // 続ける（このキャッシュ自体は再起動まで消えないため）。
+        let shape = if status.is_success() {
+            AuthShape::Anonymous
+        } else if status == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(registry_auth::parse_bearer_challenge);
+            match challenge {
+                Some(challenge) => AuthShape::Bearer {
+                    realm: challenge.realm,
+                    service: challenge.service,
+                },
+                None => {
+                    return Err(BlobFetchError::UnexpectedAuthProbeStatus {
+                        upstream: upstream.id.clone(),
+                        status: status.as_u16(),
+                    });
+                }
+            }
+        } else {
+            return Err(BlobFetchError::UnexpectedAuthProbeStatus {
+                upstream: upstream.id.clone(),
+                status: status.as_u16(),
+            });
         };
         self.auth_shapes
             .lock()
@@ -317,6 +346,27 @@ struct InFlightEntry {
     waiters: AtomicUsize,
 }
 
+/// `acquire_in_flight` が返す予約。`Drop` で必ず1回だけ解放する。
+///
+/// 呼び出し元が `entry.lock` を待っている間、または取得処理中に
+/// キャンセルされる（呼び出し元の Future が途中で破棄される）と、以降の
+/// コードは実行されない。解放を関数内の明示的な呼び出しに頼ると、その
+/// パスを踏めないまま `waiters` が戻らず、そのダイジェストのエントリが
+/// 永遠に片付かなくなる（`in_flight` に残り続ける）。`Drop` はキャンセル
+/// されても必ず走るため、ここに解放処理を置く。
+struct InFlightReservation<'a, S> {
+    cache: &'a BlobCache<S>,
+    digest: String,
+    entry: Arc<InFlightEntry>,
+}
+
+impl<S> Drop for InFlightReservation<'_, S> {
+    fn drop(&mut self) {
+        self.cache
+            .release_in_flight(&self.digest, Arc::clone(&self.entry));
+    }
+}
+
 /// ダイジェストを鍵とした blob の保存（REQ-0010）。
 ///
 /// 保存先は OCI Image Layout に沿った `<root>/blobs/<algorithm>/<hex>`
@@ -332,10 +382,7 @@ pub struct BlobCache<S> {
     in_flight: Mutex<HashMap<String, Arc<InFlightEntry>>>,
 }
 
-impl<S> BlobCache<S>
-where
-    S: BlobSource,
-{
+impl<S> BlobCache<S> {
     pub fn new(root: impl Into<PathBuf>, source: S) -> Self {
         Self {
             root: root.into(),
@@ -344,78 +391,26 @@ where
         }
     }
 
-    /// 保存済みならそのパスを返し（上流へは問い合わせない）、無ければ
-    /// 上流から取得して保存してからパスを返す。
-    ///
-    /// 同じダイジェストへの並行な要求は、最初の1件だけが実際に取得を行い、
-    /// 残りはその完了を待ってから保存済みの内容を返す。
-    pub async fn get(
-        &self,
-        upstream: &Upstream,
-        repository: &str,
-        digest: &str,
-    ) -> Result<PathBuf, BlobFetchError> {
-        let path = self.blob_path(digest)?;
-        if self.exists(&path).await? {
-            return Ok(path);
-        }
-
-        let entry = self.acquire_in_flight(digest);
-        let guard = entry.lock.lock().await;
-
-        // ロック待ちの間に別の呼び出しが取得を終えているかもしれないので
-        // 再確認する。ここでヒットすれば上流へは一切問い合わせずに済む。
-        let result = if self.exists(&path).await? {
-            Ok(path)
-        } else {
-            self.fetch_and_store(upstream, repository, digest, &path)
-                .await
-        };
-
-        drop(guard);
-        self.release_in_flight(digest, entry);
-        result
-    }
-
     async fn exists(&self, path: &Path) -> Result<bool, BlobFetchError> {
         tokio::fs::try_exists(path)
             .await
             .map_err(BlobFetchError::Io)
     }
 
-    async fn fetch_and_store(
-        &self,
-        upstream: &Upstream,
-        repository: &str,
-        digest: &str,
-        path: &Path,
-    ) -> Result<PathBuf, BlobFetchError> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(BlobFetchError::Io)?;
+    /// ダイジェストごとの進行中ロックを予約する。返り値を drop すると
+    /// （キャンセルされた場合を含め）必ず1回だけ解放される。
+    fn acquire_in_flight(&self, digest: &str) -> InFlightReservation<'_, S> {
+        let entry = {
+            let mut map = self.in_flight.lock().unwrap();
+            let entry = map.entry(digest.to_string()).or_default().clone();
+            entry.waiters.fetch_add(1, Ordering::SeqCst);
+            entry
+        };
+        InFlightReservation {
+            cache: self,
+            digest: digest.to_string(),
+            entry,
         }
-
-        let (tmp_path, writer) = create_unique_tmp_file(path).await?;
-        if let Err(err) = self
-            .source
-            .fetch_into(upstream, repository, digest, writer)
-            .await
-        {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(err);
-        }
-        tokio::fs::rename(&tmp_path, path)
-            .await
-            .map_err(BlobFetchError::Io)?;
-        Ok(path.to_path_buf())
-    }
-
-    fn acquire_in_flight(&self, digest: &str) -> Arc<InFlightEntry> {
-        let mut map = self.in_flight.lock().unwrap();
-        let entry = map.entry(digest.to_string()).or_default().clone();
-        entry.waiters.fetch_add(1, Ordering::SeqCst);
-        entry
     }
 
     fn release_in_flight(&self, digest: &str, entry: Arc<InFlightEntry>) {
@@ -446,5 +441,88 @@ where
             return Err(BlobFetchError::InvalidDigest(digest.to_string()));
         }
         Ok(self.root.join("blobs").join(algorithm).join(hex))
+    }
+}
+
+impl<S> BlobCache<S>
+where
+    S: BlobSource,
+{
+    /// 保存済みならそのパスを返し（上流へは問い合わせない）、無ければ
+    /// 上流から取得して保存してからパスを返す。
+    ///
+    /// 同じダイジェストへの並行な要求は、最初の1件だけが実際に取得を行い、
+    /// 残りはその完了を待ってから保存済みの内容を返す。
+    pub async fn get(
+        &self,
+        upstream: &Upstream,
+        repository: &str,
+        digest: &str,
+    ) -> Result<PathBuf, BlobFetchError> {
+        let path = self.blob_path(digest)?;
+        if self.exists(&path).await? {
+            return Ok(path);
+        }
+
+        let reservation = self.acquire_in_flight(digest);
+        let guard = reservation.entry.lock.lock().await;
+
+        // ロック待ちの間に別の呼び出しが取得を終えているかもしれないので
+        // 再確認する。ここでヒットすれば上流へは一切問い合わせずに済む。
+        let result = if self.exists(&path).await? {
+            Ok(path)
+        } else {
+            self.fetch_and_store(upstream, repository, digest, &path)
+                .await
+        };
+
+        drop(guard);
+        result
+        // `reservation` はここで drop され、進行中ロックを解放する
+        // （途中でキャンセルされた場合も同様）。
+    }
+
+    async fn fetch_and_store(
+        &self,
+        upstream: &Upstream,
+        repository: &str,
+        digest: &str,
+        path: &Path,
+    ) -> Result<PathBuf, BlobFetchError> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(BlobFetchError::Io)?;
+        }
+
+        let (tmp_path, mut writer) = create_unique_tmp_file(path).await?;
+        if let Err(err) = self
+            .source
+            .fetch_into(upstream, repository, digest, &mut writer)
+            .await
+        {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(err);
+        }
+        // flush だけでは write の完了が保証されるだけで、電源断からの
+        // 復旧を保証しない。rename の前に一時ファイルを fsync し、
+        // rename 後は親ディレクトリも fsync してディレクトリエントリの
+        // 更新自体を永続化する。
+        writer
+            .get_ref()
+            .sync_all()
+            .await
+            .map_err(BlobFetchError::Io)?;
+        drop(writer);
+        tokio::fs::rename(&tmp_path, path)
+            .await
+            .map_err(BlobFetchError::Io)?;
+        if let Some(parent) = path.parent() {
+            let dir = tokio::fs::File::open(parent)
+                .await
+                .map_err(BlobFetchError::Io)?;
+            dir.sync_all().await.map_err(BlobFetchError::Io)?;
+        }
+        Ok(path.to_path_buf())
     }
 }

@@ -29,6 +29,17 @@ async fn register_blob(server: &MockServer, repository: &str, digest: &str, cont
         .await;
 }
 
+/// 認証方式の確認（`GET /v2/`）に対して、challenge の無い成功応答を返す
+/// よう登録する。未登録のままだと wiremock の既定応答（404）になり、
+/// 匿名上流と誤認せず取得を失敗させる（`OciBlobSource::auth_shape` 参照）。
+async fn register_anonymous_v2(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(server)
+        .await;
+}
+
 /// REQ-0010: 上流レジストリから取得した blob はダイジェストを鍵として
 /// 保存され、以降の同一ダイジェストへの要求は上流レジストリへ問い合わせず
 /// 保存内容から応答する。
@@ -38,6 +49,7 @@ async fn blob_served_from_store_without_upstream_call() {
     let repository = "library/nginx";
     let content = b"this is a fake layer blob for the test".to_vec();
     let digest = digest_of(&content);
+    register_anonymous_v2(&server).await;
     register_blob(&server, repository, &digest, &content).await;
 
     let upstream = Upstream::new("docker.io", server.uri());
@@ -69,6 +81,7 @@ async fn blob_is_stored_under_digest_addressed_path() {
     let content = b"another fake layer blob".to_vec();
     let digest = digest_of(&content);
     let hex = digest.strip_prefix("sha256:").unwrap();
+    register_anonymous_v2(&server).await;
     register_blob(&server, repository, &digest, &content).await;
 
     let upstream = Upstream::new("docker.io", server.uri());
@@ -178,6 +191,7 @@ async fn concurrent_requests_for_same_digest_are_coalesced() {
     let content = b"coalesced blob content".to_vec();
     let digest = digest_of(&content);
 
+    register_anonymous_v2(&server).await;
     Mock::given(method("GET"))
         .and(path(format!("/v2/{repository}/blobs/{digest}")))
         .respond_with(
@@ -245,6 +259,7 @@ async fn repeated_fetch_reuses_cached_auth_shape_for_anonymous_upstream() {
     let second = b"second blob".to_vec();
     let first_digest = digest_of(&first);
     let second_digest = digest_of(&second);
+    register_anonymous_v2(&server).await;
     register_blob(&server, repository, &first_digest, &first).await;
     register_blob(&server, repository, &second_digest, &second).await;
 
@@ -264,4 +279,73 @@ async fn repeated_fetch_reuses_cached_auth_shape_for_anonymous_upstream() {
         .filter(|request| request.url.path() == "/v2/")
         .count();
     assert_eq!(v2_requests, 1);
+}
+
+/// 認証方式の確認（`GET /v2/`）がリダイレクトを返しても追従しない
+/// （CodeRabbit レビュー指摘: 設定済みの上流が悪意を持つ、または乗っ取ら
+/// れた場合、リダイレクト先として任意のホストを指定してこのサーバーに
+/// 問い合わせさせられる SSRF になる）。
+#[tokio::test]
+async fn blob_fetch_does_not_follow_redirect_from_auth_probe() {
+    let server = MockServer::start().await;
+    let attacker = MockServer::start().await;
+    let repository = "library/nginx";
+    let content = b"should never be fetched via redirect".to_vec();
+    let digest = digest_of(&content);
+
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("Location", format!("{}/v2/", attacker.uri())),
+        )
+        .mount(&server)
+        .await;
+    // 攻撃者側が呼ばれたかどうかを確かめられるよう応答は用意しておく
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&attacker)
+        .await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let cache = BlobCache::new(store_dir.path(), OciBlobSource::new());
+
+    let result = cache.get(&upstream, repository, &digest).await;
+
+    assert!(result.is_err());
+    assert!(attacker.received_requests().await.unwrap().is_empty());
+}
+
+/// 認証方式の確認（`GET /v2/`）が一時的に 5xx を返しても、その結果を
+/// 「匿名」としてキャッシュしない。上流が回復すれば次の要求で正しく
+/// 認証方式を再確認できる（CodeRabbit レビュー指摘）。
+#[tokio::test]
+async fn transient_auth_probe_failure_is_not_cached_as_anonymous() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let content = b"blob after upstream recovers".to_vec();
+    let digest = digest_of(&content);
+
+    // 最初の1回だけ 503 を返し、それ以降は正常な匿名応答に切り替わる
+    // （優先度が同じ mock は先に mount した方が優先されるため、この順序で
+    // 「1回だけ落ちて、以降は回復する」上流を再現できる）。
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    register_anonymous_v2(&server).await;
+    register_blob(&server, repository, &digest, &content).await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let cache = BlobCache::new(store_dir.path(), OciBlobSource::new());
+
+    let first_attempt = cache.get(&upstream, repository, &digest).await;
+    assert!(first_attempt.is_err());
+
+    let second_attempt = cache.get(&upstream, repository, &digest).await.unwrap();
+    assert_eq!(tokio::fs::read(&second_attempt).await.unwrap(), content);
 }

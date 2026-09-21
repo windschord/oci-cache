@@ -77,6 +77,14 @@ async fn large_blob_relay_does_not_buffer_whole_body() {
     let content = vec![0xABu8; 16 * 1024 * 1024];
     let digest = digest_of(&content);
 
+    // 認証方式の確認（GET /v2/）に challenge の無い成功応答を返す。未登録
+    // だと wiremock の既定応答（404）になり、匿名上流と誤認せず取得を
+    // 失敗させる（`OciBlobSource::auth_shape` 参照）。
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path(format!("/v2/{repository}/blobs/{digest}")))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
