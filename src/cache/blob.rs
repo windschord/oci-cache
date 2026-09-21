@@ -110,7 +110,12 @@ impl OciBlobSource {
         }
     }
 
-    fn client_and_registry(&self, upstream: &Upstream) -> Result<(Client, String), BlobFetchError> {
+    /// `manifest` モジュールもマニフェストの取得で同じクライアント・認証
+    /// キャッシュを再利用するため `pub(crate)`。
+    pub(crate) fn client_and_registry(
+        &self,
+        upstream: &Upstream,
+    ) -> Result<(Client, String), BlobFetchError> {
         let (registry, protocol) = parse_upstream_url(&upstream.base_url)?;
         let mut clients = self.clients.lock().unwrap();
         let client = match clients.get(&upstream.id) {
@@ -193,7 +198,9 @@ impl OciBlobSource {
     /// ここで `registry_auth::realm_is_trusted` による検証を済ませてから
     /// `RegistryAuth::Bearer` として渡す。これにより `oci_client` 内部が
     /// 未検証の `realm` へリクエストする経路（SSRF）を経由しない。
-    async fn resolve_auth(
+    /// `manifest` モジュールもマニフェストの取得で同じ認証解決を再利用する
+    /// ため `pub(crate)`。
+    pub(crate) async fn resolve_auth(
         &self,
         upstream: &Upstream,
         repository: &str,
@@ -428,7 +435,9 @@ impl<S> BlobCache<S> {
         }
     }
 
-    fn blob_path(&self, digest: &str) -> Result<PathBuf, BlobFetchError> {
+    /// `manifest` モジュールが、既知のダイジェストから保存済みの内容を
+    /// 読み戻すために使うため `pub(crate)`。
+    pub(crate) fn blob_path(&self, digest: &str) -> Result<PathBuf, BlobFetchError> {
         let (algorithm, hex) = digest
             .split_once(':')
             .ok_or_else(|| BlobFetchError::InvalidDigest(digest.to_string()))?;
@@ -504,25 +513,93 @@ where
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(err);
         }
-        // flush だけでは write の完了が保証されるだけで、電源断からの
-        // 復旧を保証しない。rename の前に一時ファイルを fsync し、
-        // rename 後は親ディレクトリも fsync してディレクトリエントリの
-        // 更新自体を永続化する。
-        writer
-            .get_ref()
-            .sync_all()
-            .await
-            .map_err(BlobFetchError::Io)?;
-        drop(writer);
-        tokio::fs::rename(&tmp_path, path)
-            .await
-            .map_err(BlobFetchError::Io)?;
+        finalize_tmp_file(tmp_path, writer, path).await
+    }
+}
+
+impl<S> BlobCache<S> {
+    /// 上流から別の経路（例: タグ参照でのマニフェスト取得）で内容を取得
+    /// 済みの場合に、そのダイジェストを鍵として保存する。既に保存済みなら
+    /// そのパスを返すだけで書き込みは行わない。
+    ///
+    /// `get` と異なり `source` を使わず、呼び出し側が既に持っている内容を
+    /// そのまま書き込む。マニフェストのタグ参照はダイジェストを事前に
+    /// 知り得ないため、`get`（ダイジェストが既知であることが前提）は使えない。
+    pub async fn store(&self, digest: &str, content: &[u8]) -> Result<PathBuf, BlobFetchError> {
+        let path = self.blob_path(digest)?;
+        if self.exists(&path).await? {
+            return Ok(path);
+        }
+
+        let reservation = self.acquire_in_flight(digest);
+        let guard = reservation.entry.lock.lock().await;
+
+        let result = if self.exists(&path).await? {
+            Ok(path)
+        } else {
+            self.write_and_store(content, &path).await
+        };
+
+        drop(guard);
+        result
+    }
+
+    async fn write_and_store(
+        &self,
+        content: &[u8],
+        path: &Path,
+    ) -> Result<PathBuf, BlobFetchError> {
         if let Some(parent) = path.parent() {
-            let dir = tokio::fs::File::open(parent)
+            tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(BlobFetchError::Io)?;
-            dir.sync_all().await.map_err(BlobFetchError::Io)?;
         }
-        Ok(path.to_path_buf())
+
+        let (tmp_path, mut writer) = create_unique_tmp_file(path).await?;
+        if let Err(err) = write_all_and_flush(&mut writer, content).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(BlobFetchError::Io(err));
+        }
+        finalize_tmp_file(tmp_path, writer, path).await
     }
+}
+
+/// `BufWriter` に書き込んだ内容を明示的に flush する。`finalize_tmp_file`
+/// が呼ぶ `sync_all` は内側の `File` に対して直接行われ、`BufWriter` の
+/// バッファを経由しないため、flush していない内容は永続化されない。
+async fn write_all_and_flush(
+    writer: &mut BufWriter<tokio::fs::File>,
+    content: &[u8],
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    writer.write_all(content).await?;
+    writer.flush().await
+}
+
+/// 一時ファイルへの書き込み完了後の後始末（`fetch_and_store` /
+/// `write_and_store` で共通）。flush だけでは write の完了が保証される
+/// だけで、電源断からの復旧を保証しない。rename の前に一時ファイルを
+/// fsync し、rename 後は親ディレクトリも fsync してディレクトリエントリ
+/// の更新自体を永続化する。
+async fn finalize_tmp_file(
+    tmp_path: PathBuf,
+    writer: BufWriter<tokio::fs::File>,
+    path: &Path,
+) -> Result<PathBuf, BlobFetchError> {
+    writer
+        .get_ref()
+        .sync_all()
+        .await
+        .map_err(BlobFetchError::Io)?;
+    drop(writer);
+    tokio::fs::rename(&tmp_path, path)
+        .await
+        .map_err(BlobFetchError::Io)?;
+    if let Some(parent) = path.parent() {
+        let dir = tokio::fs::File::open(parent)
+            .await
+            .map_err(BlobFetchError::Io)?;
+        dir.sync_all().await.map_err(BlobFetchError::Io)?;
+    }
+    Ok(path.to_path_buf())
 }

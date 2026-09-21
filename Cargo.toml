@@ -27,6 +27,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "s
 # oci-client の SizedStream を読み進めるのに使う。oci-client 自体が依存している
 # ため、バージョンを追加で固定する必要はない
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# oci-client の pull_manifest_raw が返す生バイト列の型（REQ-0011 / REQ-0012）。
+# oci-client 自体が依存しているため、バージョンを追加で固定する必要はない
+bytes = "1"
 
 # 保存とインデックス（REQ-0020 / REQ-0050）
 redb = "4"

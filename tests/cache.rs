@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use oci_cache::cache::{BlobCache, BlobSource, OciBlobSource};
+use oci_cache::cache::{BlobCache, BlobSource, ManifestCache, ManifestReference, OciBlobSource};
 use oci_cache::routing::Upstream;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -27,6 +27,26 @@ async fn register_blob(server: &MockServer, repository: &str, digest: &str, cont
         .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
         .mount(server)
         .await;
+}
+
+async fn register_manifest(server: &MockServer, repository: &str, reference: &str, content: &[u8]) {
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/manifests/{reference}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.to_vec()))
+        .mount(server)
+        .await;
+}
+
+fn manifest_requests_count(
+    requests: &[wiremock::Request],
+    repository: &str,
+    reference: &str,
+) -> usize {
+    let manifest_path = format!("/v2/{repository}/manifests/{reference}");
+    requests
+        .iter()
+        .filter(|request| request.url.path() == manifest_path)
+        .count()
 }
 
 /// 認証方式の確認（`GET /v2/`）に対して、challenge の無い成功応答を返す
@@ -348,4 +368,148 @@ async fn transient_auth_probe_failure_is_not_cached_as_anonymous() {
 
     let second_attempt = cache.get(&upstream, repository, &digest).await.unwrap();
     assert_eq!(tokio::fs::read(&second_attempt).await.unwrap(), content);
+}
+
+/// REQ-0012: ダイジェストを指定してマニフェストを要求した時、保存済み
+/// マニフェストが存在すれば有効期間を確認せずに応答する（内容が不変な
+/// ダイジェスト参照は再検証の必要が無い）。
+#[tokio::test]
+async fn digest_manifest_never_revalidated() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let content =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#.to_vec();
+    let digest = digest_of(&content);
+    register_anonymous_v2(&server).await;
+    register_manifest(&server, repository, &digest, &content).await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let cache = ManifestCache::new(store_dir.path(), OciBlobSource::new());
+    let reference = ManifestReference::Digest(digest.clone());
+
+    let first = cache.get(&upstream, repository, &reference).await.unwrap();
+    assert_eq!(first.content, content);
+    assert!(!first.stale);
+
+    let second = cache.get(&upstream, repository, &reference).await.unwrap();
+    assert_eq!(second.content, content);
+
+    let requests = server.received_requests().await.unwrap();
+    // ダイジェスト参照は保存済みなら再問い合わせしないため、2回目で
+    // manifests エンドポイントへの要求は増えない
+    assert_eq!(manifest_requests_count(&requests, repository, &digest), 1);
+}
+
+/// REQ-0011: タグを指定してマニフェストを要求し、かつ保存済みマニフェスト
+/// の有効期間が経過している時、上流レジストリへ再問い合わせする。
+#[tokio::test(start_paused = true)]
+async fn expired_tag_manifest_triggers_revalidation() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let tag = "latest";
+    register_anonymous_v2(&server).await;
+    let first_content = br#"{"schemaVersion":2,"first":true}"#.to_vec();
+    let second_content = br#"{"schemaVersion":2,"first":false}"#.to_vec();
+    // 優先度が同じ mock は先に mount した方が優先されるため、
+    // up_to_n_times(1) の枠を使い切った後は2件目の応答に切り替わる
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/manifests/{tag}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(first_content.clone()))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    register_manifest(&server, repository, tag, &second_content).await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let cache = ManifestCache::new(store_dir.path(), OciBlobSource::new());
+    let reference = ManifestReference::Tag(tag.to_string());
+
+    let first = cache.get(&upstream, repository, &reference).await.unwrap();
+    assert_eq!(first.content, first_content);
+
+    // 既定の有効期間（30分）を超えて時間を進める
+    tokio::time::advance(ManifestCache::DEFAULT_TAG_TTL + Duration::from_secs(1)).await;
+
+    let second = cache.get(&upstream, repository, &reference).await.unwrap();
+
+    assert_eq!(second.content, second_content);
+    assert!(!second.stale);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(manifest_requests_count(&requests, repository, tag), 2);
+}
+
+/// REQ-0014: 再検証のための上流への問い合わせが失敗した時、保存済みの
+/// 内容が存在すればそれを返し、再検証されていないことを示す。
+#[tokio::test(start_paused = true)]
+async fn stale_content_served_when_upstream_unreachable() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let tag = "latest";
+    let content = br#"{"schemaVersion":2,"stale":"candidate"}"#.to_vec();
+    register_anonymous_v2(&server).await;
+    register_manifest(&server, repository, tag, &content).await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let cache = ManifestCache::new(store_dir.path(), OciBlobSource::new());
+    let reference = ManifestReference::Tag(tag.to_string());
+
+    let first = cache.get(&upstream, repository, &reference).await.unwrap();
+    assert_eq!(first.content, content);
+
+    // 有効期間を過ぎさせたうえで、上流が応答しなくなった状況を再現する
+    tokio::time::advance(ManifestCache::DEFAULT_TAG_TTL + Duration::from_secs(1)).await;
+    server.reset().await;
+    register_anonymous_v2(&server).await;
+    // manifests エンドポイントには何も登録しないため、要求は失敗する
+
+    let second = cache.get(&upstream, repository, &reference).await.unwrap();
+
+    assert_eq!(second.content, content);
+    assert!(second.stale);
+}
+
+/// REQ-0015: タグ参照マニフェストの既定の有効期間は30分。
+#[test]
+fn tag_manifest_default_ttl_is_30_minutes() {
+    assert_eq!(ManifestCache::DEFAULT_TAG_TTL, Duration::from_secs(30 * 60));
+}
+
+/// REQ-0018: 運用者がタグ参照マニフェストの有効期間を設定した時、
+/// システムは既定値ではなく設定された値を使う。
+#[tokio::test(start_paused = true)]
+async fn configured_ttl_overrides_default() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let tag = "latest";
+    register_anonymous_v2(&server).await;
+    let first_content = br#"{"schemaVersion":2,"first":true}"#.to_vec();
+    let second_content = br#"{"schemaVersion":2,"first":false}"#.to_vec();
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/manifests/{tag}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(first_content.clone()))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    register_manifest(&server, repository, tag, &second_content).await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let custom_ttl = Duration::from_millis(50);
+    let cache = ManifestCache::with_tag_ttl(store_dir.path(), OciBlobSource::new(), custom_ttl);
+    let reference = ManifestReference::Tag(tag.to_string());
+
+    let first = cache.get(&upstream, repository, &reference).await.unwrap();
+    assert_eq!(first.content, first_content);
+
+    // 既定値（30分）よりはるかに短いが、設定した TTL は超える時間だけ進める
+    tokio::time::advance(custom_ttl + Duration::from_millis(50)).await;
+
+    let second = cache.get(&upstream, repository, &reference).await.unwrap();
+
+    // 既定値のままなら再検証は起きないはずだが、設定した短い TTL が効いて
+    // いれば再検証され、新しい内容に更新される
+    assert_eq!(second.content, second_content);
 }
