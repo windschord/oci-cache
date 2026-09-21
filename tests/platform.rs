@@ -120,12 +120,16 @@ async fn large_blob_relay_does_not_buffer_whole_body() {
 /// 接続を受け付けなければならない。
 #[tokio::test]
 async fn tls_listener_accepts_configured_certificate() {
+    // 接続に使う 127.0.0.1 を SAN に含める（IP 経由で接続するため、
+    // ホスト名 "localhost" だけでは証明書検証がホスト名不一致で失敗する）
     let rcgen::CertifiedKey { cert, signing_key } =
-        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+            .unwrap();
+    let cert_pem = cert.pem();
     let cert_dir = tempfile::tempdir().unwrap();
     let cert_path = cert_dir.path().join("cert.pem");
     let key_path = cert_dir.path().join("key.pem");
-    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&cert_path, &cert_pem).unwrap();
     std::fs::write(&key_path, signing_key.serialize_pem()).unwrap();
 
     // OS に空きポートを選ばせ、実際に割り当てられたアドレスへ接続する
@@ -137,11 +141,14 @@ async fn tls_listener_accepts_configured_certificate() {
     let app = build_router(state);
     let server = tokio::spawn(serve_tls_on(listener, cert_path, key_path, app));
 
-    // 自己署名証明書のため検証は無効化する。ここで確かめたいのは TLS の
-    // ハンドシェイク自体が、設定した証明書・秘密鍵で成立することであり、
-    // 証明書チェーンの信頼性ではない
+    // `serve_tls_on` へ渡したのと同じ証明書だけを信頼するクライアントを
+    // 使う（CodeRabbit レビュー指摘: `danger_accept_invalid_certs` では
+    // 任意の証明書を受け入れてしまい、`cert_path` / `key_path` が実際に
+    // 使われたことを検証できていなかった）。これにより、提示された証明書が
+    // 設定したものと異なれば検証が失敗するようになる
+    let root_cert = reqwest::Certificate::from_pem(cert_pem.as_bytes()).unwrap();
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .add_root_certificate(root_cert)
         .build()
         .unwrap();
     let url = format!("https://127.0.0.1:{}/v2/", addr.port());

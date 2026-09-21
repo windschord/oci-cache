@@ -108,6 +108,7 @@ where
                 self.memo.put_negative(
                     repository,
                     tokio::time::Instant::now() + self.config.negative_cache_ttl,
+                    self.generation,
                 );
                 Err(RoutingError::NotFoundOnAnyUpstream)
             }

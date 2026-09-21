@@ -17,7 +17,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use oci_client::Reference;
+use oci_client::secrets::RegistryAuth;
+use oci_client::{Reference, RegistryOperation};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::routing::Upstream;
@@ -72,9 +73,26 @@ impl OciManifestSource {
     ) -> Result<(bytes::Bytes, String), BlobFetchError> {
         let auth = self.inner.resolve_auth(upstream, repository).await?;
         let (client, _registry) = self.inner.client_and_registry(upstream)?;
-        // `pull_manifest_raw` は `pull_blob_stream` と異なり、認証済みか
-        // どうかに関わらず `auth` を渡すだけで済む（内部で必要なら自ら
-        // トークンを保存する）。
+
+        // `oci_client::Client` はトークンを `(registry, repository, operation)`
+        // で分けてキャッシュするが、`RegistryAuth::Bearer` を渡した場合の
+        // 内部の再交渉ロジックは、リポジトリを見ずに渡された値をそのまま
+        // 返す（`_auth` 参照）。`store_auth_if_needed` が保持する認証情報は
+        // レジストリ単位のため、ここで明示的に `client.auth` を呼んで
+        // このリポジトリのキーへ確実に登録しないと、同じ `Client`
+        // （＝同じ上流）で複数のリポジトリを扱った際、後発のリポジトリが
+        // 別のリポジトリ用のトークンを誤って使い回す（blob 取得
+        // （`OciBlobSource::fetch_into`）と同じ理由で必要）。
+        if !matches!(auth, RegistryAuth::Anonymous) {
+            client
+                .auth(reference, &auth, RegistryOperation::Pull)
+                .await
+                .map_err(|source| BlobFetchError::Auth {
+                    upstream: upstream.id.clone(),
+                    source,
+                })?;
+        }
+
         client
             .pull_manifest_raw(reference, &auth, ACCEPTED_MEDIA_TYPES)
             .await
@@ -151,9 +169,13 @@ struct TagState {
 pub struct ManifestCache {
     digest_store: BlobCache<ManifestByDigestSource>,
     source: Arc<OciManifestSource>,
-    /// `(repository, tag)` ごとの再検証状態。有効期限が切れていても保持し
-    /// 続ける（REQ-0014 の stale 応答で使うため、破棄しない）。
-    tag_state: Mutex<HashMap<(String, String), TagState>>,
+    /// `(upstream.id, repository, tag)` ごとの再検証状態。有効期限が切れて
+    /// いても保持し続ける（REQ-0014 の stale 応答で使うため、破棄しない）。
+    /// `upstream.id` を含めるのは、REQ-0007 の名前衝突や `?ns=` による
+    /// 明示的な上流指定により、同じ `(repository, tag)` が複数の上流を
+    /// 指しうるため（CodeRabbit レビュー指摘: 含めないと、ある上流から
+    /// 保存した内容を別の上流への要求にも誤って使い回す）。
+    tag_state: Mutex<HashMap<(String, String, String), TagState>>,
     tag_ttl: Duration,
 }
 
@@ -209,7 +231,7 @@ impl ManifestCache {
         repository: &str,
         tag: &str,
     ) -> Result<ManifestResponse, BlobFetchError> {
-        let key = (repository.to_string(), tag.to_string());
+        let key = (upstream.id.clone(), repository.to_string(), tag.to_string());
         let now = tokio::time::Instant::now();
 
         // REQ-0011: 有効期間が残っていれば、保存済みの内容をそのまま返す
@@ -239,6 +261,15 @@ impl ManifestCache {
                     stale: false,
                 })
             }
+            // REQ-0013 相当の判断: 保存済みという理由だけで配信を続けると、
+            // 取得時点では公開だった内容が非公開化された場合に、認証情報を
+            // 持たない利用者へ配信し続けてしまう（CodeRabbit レビュー指摘:
+            // Authorization Bypass）。stale 応答は一時的な到達不能エラー
+            // （下の `Err(err)` 節）に限り、認証関連の失敗はそのまま返す。
+            Err(
+                err @ (BlobFetchError::AuthenticationRequired { .. }
+                | BlobFetchError::UntrustedRealm { .. }),
+            ) => Err(err),
             Err(err) => {
                 // REQ-0014: 再検証（上流への問い合わせ）が失敗しても、
                 // 保存済みの内容があればそれを stale として返す。有効期限を
@@ -261,7 +292,7 @@ impl ManifestCache {
 
     fn fresh_tag_state(
         &self,
-        key: &(String, String),
+        key: &(String, String, String),
         now: tokio::time::Instant,
     ) -> Option<TagState> {
         let state = self.tag_state.lock().unwrap().get(key).cloned()?;

@@ -16,6 +16,7 @@ use oci_cache::routing::{
     HttpUpstreamProbe, InMemoryRoutingMemo, ProbeOutcome, ResolutionSource, Router, RoutingConfig,
     RoutingError, RoutingMemoStore, Upstream, UpstreamProbe,
 };
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -123,6 +124,16 @@ async fn pull_path_has_no_upstream_prefix() {
     let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    // REQ-0032: マニフェスト応答には Docker-Content-Digest ヘッダを含め、
+    // 応答本文から計算したダイジェストと一致させる
+    let expected_digest = format!("sha256:{}", hex::encode(Sha256::digest(&content)));
+    assert_eq!(
+        response
+            .headers()
+            .get("Docker-Content-Digest")
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_digest.as_str())
+    );
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -361,6 +372,49 @@ async fn negative_cache_suppresses_reprobe() {
     // ネガティブキャッシュが効いていれば、2回目の要求で上流へは問い合わせない
     assert_eq!(docker_server.received_requests().await.unwrap().len(), 1);
     assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
+}
+
+/// REQ-0004 と REQ-0058 の相互作用: 上流の設定順序が変更された時、
+/// ネガティブキャッシュの記録も破棄され、新しい上流に存在するリポジトリを
+/// 有効期限が切れるまで誤って不存在のまま返し続けない
+/// （CodeRabbit レビュー指摘: `put_negative` が世代を見ておらず、
+/// `activate_order` も `negative_entries` を消していなかった）。
+#[tokio::test]
+async fn negative_cache_discarded_when_upstream_order_changes() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, ghcr_server) = spawn_upstream("ghcr.io").await;
+    let repo = "library/nginx";
+    register_not_found(&docker_server, repo).await;
+    register_not_found(&ghcr_server, repo).await;
+
+    // 設定の再読み込みを、同じメモを共有した2つの Router で表現する
+    let memo = Arc::new(InMemoryRoutingMemo::default());
+
+    let config_a = RoutingConfig {
+        upstreams: vec![docker.clone(), ghcr.clone()],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let router_a = Router::new(config_a, probe(), memo.clone());
+    let first = router_a.resolve(repo, None).await.unwrap_err();
+    assert!(matches!(first, RoutingError::NotFoundOnAnyUpstream));
+
+    // 新しい上流（quay.io）を追加した設定へ切り替える
+    let (quay, quay_server) = spawn_upstream("quay.io").await;
+    register_found(&quay_server, repo).await;
+
+    let config_b = RoutingConfig {
+        upstreams: vec![docker, ghcr, quay],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let router_b = Router::new(config_b, probe(), memo);
+
+    let second = router_b.resolve(repo, None).await.unwrap();
+
+    // ネガティブキャッシュの記録が残っていれば NotFoundOnAnyUpstream に
+    // なるはずだが、設定変更で破棄されていれば quay.io まで探索が届く
+    assert_eq!(second.upstream, "quay.io");
 }
 
 /// REQ-0005: ネガティブキャッシュの既定の有効期間は30分。

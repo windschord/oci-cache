@@ -29,6 +29,12 @@ mod tls;
 
 pub use tls::serve_tls_on;
 
+/// マニフェスト応答が本文の内容から計算したダイジェストを示すヘッダ
+/// （REQ-0032 の一部）。ヘッダ名自体は仕様準拠フェーズ（REQ-0030〜0036）で
+/// 本格的に扱うが、`ManifestResponse::digest` を応答へ反映しないと
+/// containerd 等が内容を検証できず取得に失敗しうるため、ここで設定する。
+const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
+
 /// クライアントからの要求を捌くのに必要な状態一式。
 pub struct AppState {
     router: UpstreamRouter<HttpUpstreamProbe, Arc<InMemoryRoutingMemo>>,
@@ -106,7 +112,12 @@ async fn handle_v2_request(
                 .get(upstream, repository, &manifest_reference)
                 .await
             {
-                Ok(response) => (StatusCode::OK, response.content).into_response(),
+                Ok(response) => (
+                    StatusCode::OK,
+                    [(DOCKER_CONTENT_DIGEST, response.digest)],
+                    response.content,
+                )
+                    .into_response(),
                 Err(_) => StatusCode::BAD_GATEWAY.into_response(),
             }
         }

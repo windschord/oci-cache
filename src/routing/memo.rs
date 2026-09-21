@@ -33,8 +33,11 @@ pub trait RoutingMemoStore: Send + Sync {
 
     /// 全上流でリポジトリ参照が不存在だった記録を、`expires_at` を有効期限
     /// として残す（REQ-0004）。`Router` は `RoutingError::NotFoundOnAnyUpstream`
-    /// を確定できた場合にのみ呼び出す。
-    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant);
+    /// を確定できた場合にのみ呼び出す。`generation` が現在の世代と一致しない
+    /// 場合、`put` 同様に書き込みは無視される（CodeRabbit レビュー指摘:
+    /// 設定順序の変更中に探索を続けていた古い `Router` が、新しい設定の下で
+    /// 存在するはずのリポジトリを誤って不存在として記録してしまうのを防ぐ）。
+    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant, generation: u64);
     /// `repository` の不存在記録が `now` の時点でまだ有効期限内であれば
     /// `true` を返す。有効期限を過ぎた記録は破棄する。
     fn is_negative_cached(&self, repository: &str, now: tokio::time::Instant) -> bool;
@@ -78,16 +81,26 @@ impl RoutingMemoStore for InMemoryRoutingMemo {
         let mut inner = self.inner.lock().unwrap();
         if inner.order_fingerprint.as_deref() != Some(fingerprint) {
             inner.entries.clear();
+            // REQ-0058 は正の記録（`entries`）の破棄しか述べていないが、
+            // ネガティブキャッシュも順序フォールバックの結果を前提とする
+            // 記録である以上、古い設定順序の下での不存在が新しい順序でも
+            // 成り立つとは限らない。ここで消さないと、設定変更後に新しい
+            // 上流を追加しても、既に不存在として記録済みのリポジトリは
+            // 有効期限（既定30分）が切れるまで再探索されない
+            inner.negative_entries.clear();
             inner.generation += 1;
             inner.order_fingerprint = Some(fingerprint.to_string());
         }
         inner.generation
     }
 
-    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant) {
-        self.inner
-            .lock()
-            .unwrap()
+    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant, generation: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation != generation {
+            // 古い世代からの書き込みは無視する（`put` と同じレース対策）
+            return;
+        }
+        inner
             .negative_entries
             .insert(repository.to_string(), expires_at);
     }
@@ -123,8 +136,8 @@ impl<T: RoutingMemoStore + ?Sized> RoutingMemoStore for Arc<T> {
         (**self).activate_order(fingerprint)
     }
 
-    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant) {
-        (**self).put_negative(repository, expires_at)
+    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant, generation: u64) {
+        (**self).put_negative(repository, expires_at, generation)
     }
 
     fn is_negative_cached(&self, repository: &str, now: tokio::time::Instant) -> bool {
