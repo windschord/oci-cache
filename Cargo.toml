@@ -24,6 +24,9 @@ hyper = "1"
 # 上流レジストリとの通信（REQ-0051: ストリーム取得が必須要件）
 oci-client = "0.17"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+# oci-client の SizedStream を読み進めるのに使う。oci-client 自体が依存している
+# ため、バージョンを追加で固定する必要はない
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # 保存とインデックス（REQ-0020 / REQ-0050）
 redb = "4"
