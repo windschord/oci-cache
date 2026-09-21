@@ -32,6 +32,24 @@ python3 scripts/reqctl.py next-id req         # 採番
 
 要求の意味が変わる変更は「変更」ではなく「置換」。旧 ID を `superseded` にして新 ID に `supersedes` を書き、**新旧を同じコミットで**入れる。
 
+## ナレッジグラフによる裏付け調査（Graphify）
+
+設計・実装・テストなど SDD 系スキル（requirement-management / task-planning / sdd-documentation など）を実行する際は、記憶や推測で進めず [Graphify](https://github.com/Graphify-Labs/graphify) のナレッジグラフで既存コード・要求・依存関係を確認し、その結果を調査の裏付けとする。
+
+```bash
+uv tool install graphifyy         # 未導入なら最初に一度だけ
+graphify .                        # リポジトリをグラフ化（graphify-out/ に graph.json / graph.html / GRAPH_REPORT.md を生成）
+graphify query "<調べたいこと>"    # 既存実装・要求の関係を質問形式で確認
+graphify path "<概念A>" "<概念B>"  # 2つの概念間の依存・参照経路を追跡
+graphify explain "<概念>"          # 個別モジュール・要求の役割を確認
+```
+
+| すること | しないこと |
+|---|---|
+| 設計・実装・テストの着手前に `graphify query` / `graphify path` で既存の依存関係・関連要求を確認する | 記憶や推測だけでコードの構造・呼び出し関係を断定する |
+| grep や Explore の結果と突き合わせ、根拠を PR 本文や調査メモに残す | `INFERRED`（推論）エッジを未検証のまま結論の根拠にする |
+| コードやドキュメントを大きく変えたら `graphify .` でグラフを再生成してから参照する | 生成物（`graphify-out/`）をコミットする |
+
 ## 実装の進め方
 
 ### conformance テストを先に置く
