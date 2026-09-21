@@ -1311,6 +1311,7 @@ dependencies = [
  "anyhow",
  "axum",
  "figment",
+ "futures-util",
  "hex",
  "hyper",
  "metrics",
