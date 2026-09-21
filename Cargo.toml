@@ -15,8 +15,14 @@ readme = "README.md"
 [dependencies]
 # HTTP サーバ
 axum = { version = "0.8", features = ["http2", "macros"] }
+# axum を TLS（REQ-0054）で待ち受けさせるのに使う。rustls は reqwest 側と
+# feature を揃え、TLS スタックを二重に持たない
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 # "time" は上流への問い合わせを打ち切るのに使う tokio::time::timeout に要る（REQ-0057 / REQ-0059）
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time"] }
+# blob をディスクからクライアントへ中継する際、内容全体を主記憶に載せず
+# ストリームとして応答するのに使う（REQ-0051 は取得元を問わない）
+tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["trace", "set-header"] }
 hyper = "1"
@@ -58,6 +64,8 @@ anyhow = "1"
 tokio = { version = "1", features = ["test-util"] }
 wiremock = "0.6"
 tempfile = "3"
+# TLS リスナーのテスト（REQ-0054）向けに自己署名証明書を生成するのに使う
+rcgen = "0.14"
 
 [profile.release]
 lto = "thin"

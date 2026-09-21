@@ -1,6 +1,7 @@
 //! ルーティング解決のテスト。
 //!
-//! 対象要求: REQ-0001 / REQ-0002 / REQ-0003 / REQ-0007 / REQ-0009 / REQ-0056〜REQ-0059。
+//! 対象要求: REQ-0001 / REQ-0002 / REQ-0003 / REQ-0006 〜 REQ-0009 /
+//! REQ-0056〜REQ-0059。
 //! テスト名は `docs/requirements/routing.yaml` の `verification.ref` と一致させてある。
 //!
 //! 上流レジストリは wiremock でモックし、`GET /v2/<repository>/tags/list` への
@@ -9,10 +10,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
 use oci_cache::routing::{
     HttpUpstreamProbe, InMemoryRoutingMemo, ProbeOutcome, ResolutionSource, Router, RoutingConfig,
     RoutingError, RoutingMemoStore, Upstream, UpstreamProbe,
 };
+use tower::ServiceExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -77,6 +81,52 @@ async fn ns_hint_selects_single_upstream() {
     assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
     assert!(docker_server.received_requests().await.unwrap().is_empty());
     assert!(quay_server.received_requests().await.unwrap().is_empty());
+}
+
+/// REQ-0006: クライアントが指定するイメージ参照に、上流レジストリを識別
+/// するための追加のパス要素を要求しない。`/v2/<repository>/manifests/...`
+/// だけで要求が届き、上流の決定にはクエリパラメータ（`?ns=`、REQ-0001）
+/// だけを使う。
+#[tokio::test]
+async fn pull_path_has_no_upstream_prefix() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let repo = "library/nginx";
+    let content = b"manifest content for path transparency test".to_vec();
+    register_found(&docker_server, repo).await;
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&docker_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/manifests/latest")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+        .mount(&docker_server)
+        .await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let store_dir = tempfile::tempdir().unwrap();
+    let state = oci_cache::server::AppState::new(config, store_dir.path());
+    let app = oci_cache::server::build_router(state);
+
+    // 上流を識別するパス要素（例: `/docker.io/library/nginx/...`）を
+    // 一切含まない
+    let request = HttpRequest::builder()
+        .uri(format!("/v2/{repo}/manifests/latest?ns=docker.io"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), content.as_slice());
 }
 
 /// REQ-0002: 名前空間ヒントもルーティングメモも無い時、設定順序で問い合わせ、
