@@ -10,3 +10,8 @@
 
 # conformance スイートの取得先と生成物（scripts/conformance.sh が作る）
 /.conformance/
+
+# Graphify が生成するナレッジグラフ（CLAUDE.md の「ナレッジグラフによる裏付け調査」参照）
+/graph.json
+/graph.html
+/GRAPH_REPORT.md
