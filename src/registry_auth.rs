@@ -8,7 +8,7 @@
 use reqwest::Url;
 use serde::Deserialize;
 
-use crate::routing::Upstream;
+use crate::routing::{Upstream, UpstreamCredentials};
 
 pub struct BearerChallenge {
     pub realm: String,
@@ -69,6 +69,17 @@ pub fn realm_is_trusted(upstream: &Upstream, realm: &str) -> bool {
     }
 }
 
+/// `upstream.base_url` と `realm` の双方が `https` かを確認する。
+fn uses_https(upstream: &Upstream, realm: &str) -> bool {
+    let Ok(base) = Url::parse(&upstream.base_url) else {
+        return false;
+    };
+    let Ok(realm_url) = Url::parse(realm) else {
+        return false;
+    };
+    base.scheme() == "https" && realm_url.scheme() == "https"
+}
+
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     token: Option<String>,
@@ -77,12 +88,26 @@ struct TokenResponse {
 
 /// `realm` を検証したうえでトークンを取得する。信頼できない `realm` なら
 /// 何もリクエストせずに `None` を返す（SSRF 対策）。
+///
+/// `credentials` を渡すと、トークン要求に HTTP Basic 認証として付与する
+/// （REQ-0016）。呼び出し側は、非公開イメージを保存・配信しないための
+/// 判定（REQ-0013 / REQ-0019）を別途 `credentials: None` での呼び出しで
+/// 行う責任を持つ（`cache::blob::OciBlobSource::resolve_auth` 参照）。
 pub async fn fetch_bearer_token(
     token_client: &reqwest::Client,
     upstream: &Upstream,
     challenge: &BearerChallenge,
+    credentials: Option<&UpstreamCredentials>,
 ) -> Option<String> {
     if !realm_is_trusted(upstream, &challenge.realm) {
+        return None;
+    }
+    // REQ-0016: 運用者の認証情報は、ネットワーク上の第三者に平文で読み取ら
+    // れうる HTTP 経路へは送らない。`realm_is_trusted` は `realm` と
+    // `base_url` のスキームが一致することしか見ないため（両方 `http` でも
+    // 通る）、認証情報を使う場合はここで別途 `https` を要求する
+    // （CodeRabbit レビュー指摘: CWE-319 Cleartext Transmission）。
+    if credentials.is_some() && !uses_https(upstream, &challenge.realm) {
         return None;
     }
     let mut query = Vec::new();
@@ -92,12 +117,11 @@ pub async fn fetch_bearer_token(
     if let Some(scope) = &challenge.scope {
         query.push(("scope", scope.as_str()));
     }
-    let response = token_client
-        .get(&challenge.realm)
-        .query(&query)
-        .send()
-        .await
-        .ok()?;
+    let mut request = token_client.get(&challenge.realm).query(&query);
+    if let Some(credentials) = credentials {
+        request = request.basic_auth(&credentials.username, Some(&credentials.password));
+    }
+    let response = request.send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -122,4 +146,53 @@ pub fn new_token_client() -> reqwest::Client {
         // ビルドが失敗するのは環境自体が壊れている場合のみなので、黙って
         // 迂回させず起動時に失敗させる。
         .expect("リダイレクトを無効化した reqwest クライアントの構築に失敗しました")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// `uses_https` は `base_url` と `realm` の両方が `https` の場合のみ
+    /// 真を返す。
+    #[test]
+    fn uses_https_requires_both_base_url_and_realm_to_be_https() {
+        let https_upstream = Upstream::new("docker.io", "https://registry-1.docker.io");
+        let http_upstream = Upstream::new("docker.io", "http://registry-1.docker.io");
+
+        assert!(uses_https(&https_upstream, "https://auth.docker.io/token"));
+        assert!(!uses_https(&https_upstream, "http://auth.docker.io/token"));
+        assert!(!uses_https(&http_upstream, "https://auth.docker.io/token"));
+        assert!(!uses_https(&http_upstream, "http://auth.docker.io/token"));
+    }
+
+    /// REQ-0016 / CodeRabbit レビュー指摘（CWE-319）: 認証情報が設定されて
+    /// いても、上流が HTTP の場合はトークン要求そのものを行わない。
+    #[tokio::test]
+    async fn credentials_are_not_sent_over_plain_http() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "should-never-be-issued",
+            })))
+            .mount(&server)
+            .await;
+
+        let upstream = Upstream::new("docker.io", server.uri());
+        let challenge = BearerChallenge {
+            realm: format!("{}/token", server.uri()),
+            service: None,
+            scope: None,
+        };
+        let credentials = UpstreamCredentials::new("produser", "s3cr3t");
+        let token_client = new_token_client();
+
+        let token =
+            fetch_bearer_token(&token_client, &upstream, &challenge, Some(&credentials)).await;
+
+        assert!(token.is_none());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 }

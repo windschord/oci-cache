@@ -20,6 +20,13 @@ pub struct Upstream {
     /// 設定した上流が悪意を持てば任意のホストへリクエストさせられてしまう
     /// （SSRF）。
     pub token_host: Option<String>,
+    /// 上流レジストリへの問い合わせに使う認証情報（REQ-0016）。
+    ///
+    /// 目的は Docker Hub の要求回数制限の緩和に限る。非公開イメージの
+    /// 保持を許すものではなく、認証情報なしでは取得できない内容は
+    /// 認証情報の有無に関わらず保存しない（REQ-0013 / REQ-0019、
+    /// `cache::blob::OciBlobSource::resolve_auth` 参照）。
+    pub credentials: Option<UpstreamCredentials>,
 }
 
 impl Upstream {
@@ -28,12 +35,45 @@ impl Upstream {
             id: id.into(),
             base_url: base_url.into(),
             token_host: None,
+            credentials: None,
         }
     }
 
     pub fn with_token_host(mut self, token_host: impl Into<String>) -> Self {
         self.token_host = Some(token_host.into());
         self
+    }
+
+    pub fn with_credentials(mut self, credentials: UpstreamCredentials) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+}
+
+/// 上流レジストリへの問い合わせに使う認証情報（REQ-0016）。
+///
+/// `Debug` はログ等への漏洩を避けるため `password` を出力しない。
+#[derive(Clone, PartialEq, Eq)]
+pub struct UpstreamCredentials {
+    pub username: String,
+    pub password: String,
+}
+
+impl UpstreamCredentials {
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            username: username.into(),
+            password: password.into(),
+        }
+    }
+}
+
+impl std::fmt::Debug for UpstreamCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
     }
 }
 
@@ -44,6 +84,9 @@ pub struct RoutingConfig {
     pub upstreams: Vec<Upstream>,
     /// 上流1つあたりの問い合わせを打ち切るまでの時間（REQ-0057 / REQ-0059）。
     pub probe_timeout: Duration,
+    /// ネガティブキャッシュ（全上流が不存在を返した記録）の有効期間
+    /// （REQ-0004 / REQ-0005）。
+    pub negative_cache_ttl: Duration,
 }
 
 impl RoutingConfig {
@@ -65,6 +108,8 @@ impl Default for RoutingConfig {
             ],
             // REQ-0059: 上流問い合わせの既定待ち時間
             probe_timeout: Duration::from_secs(5),
+            // REQ-0005: ネガティブキャッシュの既定の有効期間
+            negative_cache_ttl: Duration::from_secs(30 * 60),
         }
     }
 }
