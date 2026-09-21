@@ -44,6 +44,9 @@ pub struct RoutingConfig {
     pub upstreams: Vec<Upstream>,
     /// 上流1つあたりの問い合わせを打ち切るまでの時間（REQ-0057 / REQ-0059）。
     pub probe_timeout: Duration,
+    /// ネガティブキャッシュ（全上流が不存在を返した記録）の有効期間
+    /// （REQ-0004 / REQ-0005）。
+    pub negative_cache_ttl: Duration,
 }
 
 impl RoutingConfig {
@@ -65,6 +68,8 @@ impl Default for RoutingConfig {
             ],
             // REQ-0059: 上流問い合わせの既定待ち時間
             probe_timeout: Duration::from_secs(5),
+            // REQ-0005: ネガティブキャッシュの既定の有効期間
+            negative_cache_ttl: Duration::from_secs(30 * 60),
         }
     }
 }

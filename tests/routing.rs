@@ -66,6 +66,7 @@ async fn ns_hint_selects_single_upstream() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -94,6 +95,7 @@ async fn ordered_fallback_returns_first_success() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -117,6 +119,7 @@ async fn routing_memo_skips_probe_on_second_request() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -146,6 +149,7 @@ async fn name_collision_resolved_by_configured_order() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -171,6 +175,7 @@ async fn configured_upstream_order_is_used() {
     let config = RoutingConfig {
         upstreams: vec![quay, ghcr, docker],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -195,6 +200,7 @@ async fn routing_memo_discarded_when_recorded_upstream_misses() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -229,6 +235,7 @@ async fn unresponsive_upstream_advances_to_next() {
         upstreams: vec![docker, ghcr, quay],
         // テストを高速に保つため既定値 (5秒) より短い待ち時間を使う
         probe_timeout: Duration::from_millis(50),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -255,6 +262,7 @@ async fn routing_memo_discarded_when_upstream_order_changes() {
     let config_a = RoutingConfig {
         upstreams: vec![docker.clone(), ghcr.clone(), quay.clone()],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router_a = Router::new(config_a, probe(), memo.clone());
     let first = router_a.resolve(repo, None).await.unwrap();
@@ -264,6 +272,7 @@ async fn routing_memo_discarded_when_upstream_order_changes() {
     let config_b = RoutingConfig {
         upstreams: vec![ghcr, docker, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router_b = Router::new(config_b, probe(), memo);
     let second = router_b.resolve(repo, None).await.unwrap();
@@ -273,6 +282,72 @@ async fn routing_memo_discarded_when_upstream_order_changes() {
     // 問い合わせが発生しないはず
     assert!(!ghcr_server.received_requests().await.unwrap().is_empty());
     let _ = quay_server;
+}
+
+/// REQ-0004: 全上流が不存在を返した結果を記録し、有効期間内は再探索しない。
+#[tokio::test]
+async fn negative_cache_suppresses_reprobe() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, ghcr_server) = spawn_upstream("ghcr.io").await;
+    let repo = "library/nginx";
+    register_not_found(&docker_server, repo).await;
+    register_not_found(&ghcr_server, repo).await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker, ghcr],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
+
+    let first = router.resolve(repo, None).await.unwrap_err();
+    assert!(matches!(first, RoutingError::NotFoundOnAnyUpstream));
+    assert_eq!(docker_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
+
+    let second = router.resolve(repo, None).await.unwrap_err();
+
+    assert!(matches!(second, RoutingError::NotFoundOnAnyUpstream));
+    // ネガティブキャッシュが効いていれば、2回目の要求で上流へは問い合わせない
+    assert_eq!(docker_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
+}
+
+/// REQ-0005: ネガティブキャッシュの既定の有効期間は30分。
+#[test]
+fn negative_cache_default_ttl_is_30_minutes() {
+    assert_eq!(
+        RoutingConfig::default().negative_cache_ttl,
+        Duration::from_secs(30 * 60)
+    );
+}
+
+/// REQ-0008: 設定された3つの上流レジストリすべてに問い合わせできる。
+#[tokio::test]
+async fn all_configured_upstreams_reachable() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, ghcr_server) = spawn_upstream("ghcr.io").await;
+    let (quay, quay_server) = spawn_upstream("quay.io").await;
+    let repo = "library/nginx";
+    register_not_found(&docker_server, repo).await;
+    register_not_found(&ghcr_server, repo).await;
+    register_found(&quay_server, repo).await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker, ghcr, quay],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
+
+    let resolution = router.resolve(repo, None).await.unwrap();
+
+    // 末尾の quay.io まで到達できたということは、先頭2つ（docker.io /
+    // ghcr.io）にも実際に問い合わせが行われたことを意味する
+    assert_eq!(resolution.upstream, "quay.io");
+    assert_eq!(docker_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(quay_server.received_requests().await.unwrap().len(), 1);
 }
 
 /// REQ-0059: 上流レジストリへの問い合わせの既定の待ち時間は5秒。
@@ -297,6 +372,7 @@ async fn fallback_reports_unreachable_when_some_upstream_times_out() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr],
         probe_timeout: Duration::from_millis(50),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -317,6 +393,7 @@ async fn fallback_reports_not_found_when_all_upstreams_miss() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -341,6 +418,7 @@ async fn routing_memo_rejects_write_from_stale_generation() {
     let config_a = RoutingConfig {
         upstreams: vec![docker.clone(), ghcr.clone()],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router_a = Router::new(config_a, probe(), memo.clone());
 
@@ -355,6 +433,7 @@ async fn routing_memo_rejects_write_from_stale_generation() {
     let config_b = RoutingConfig {
         upstreams: vec![ghcr, docker],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let _router_b = Router::new(config_b, probe(), memo.clone());
 

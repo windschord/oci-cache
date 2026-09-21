@@ -30,11 +30,20 @@ pub trait RoutingMemoStore: Send + Sync {
     /// 並行に呼ばれた際に、両方が同じ世代を採番してしまいうるため
     /// （それぞれの指紋比較が互いの消去より前に行われた場合）。
     fn activate_order(&self, fingerprint: &str) -> u64;
+
+    /// 全上流でリポジトリ参照が不存在だった記録を、`expires_at` を有効期限
+    /// として残す（REQ-0004）。`Router` は `RoutingError::NotFoundOnAnyUpstream`
+    /// を確定できた場合にのみ呼び出す。
+    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant);
+    /// `repository` の不存在記録が `now` の時点でまだ有効期限内であれば
+    /// `true` を返す。有効期限を過ぎた記録は破棄する。
+    fn is_negative_cached(&self, repository: &str, now: tokio::time::Instant) -> bool;
 }
 
 #[derive(Default)]
 struct Inner {
     entries: HashMap<String, String>,
+    negative_entries: HashMap<String, tokio::time::Instant>,
     order_fingerprint: Option<String>,
     generation: u64,
 }
@@ -74,6 +83,26 @@ impl RoutingMemoStore for InMemoryRoutingMemo {
         }
         inner.generation
     }
+
+    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant) {
+        self.inner
+            .lock()
+            .unwrap()
+            .negative_entries
+            .insert(repository.to_string(), expires_at);
+    }
+
+    fn is_negative_cached(&self, repository: &str, now: tokio::time::Instant) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.negative_entries.get(repository) {
+            Some(expires_at) if *expires_at > now => true,
+            Some(_) => {
+                inner.negative_entries.remove(repository);
+                false
+            }
+            None => false,
+        }
+    }
 }
 
 // 同じメモを複数の `Router` から共有できるようにする（設定再読み込みの表現に使う）。
@@ -92,5 +121,13 @@ impl<T: RoutingMemoStore + ?Sized> RoutingMemoStore for Arc<T> {
 
     fn activate_order(&self, fingerprint: &str) -> u64 {
         (**self).activate_order(fingerprint)
+    }
+
+    fn put_negative(&self, repository: &str, expires_at: tokio::time::Instant) {
+        (**self).put_negative(repository, expires_at)
+    }
+
+    fn is_negative_cached(&self, repository: &str, now: tokio::time::Instant) -> bool {
+        (**self).is_negative_cached(repository, now)
     }
 }
