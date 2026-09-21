@@ -32,6 +32,13 @@ pub enum BlobFetchError {
     UnexpectedAuthProbeStatus { upstream: String, status: u16 },
     #[error("上流レジストリ '{upstream}' が要求するトークン発行元 '{realm}' を信頼できません")]
     UntrustedRealm { upstream: String, realm: String },
+    #[error(
+        "上流レジストリ '{upstream}' のリポジトリ '{repository}' は認証情報なしでは取得できないため、保存も配信もしません"
+    )]
+    AuthenticationRequired {
+        upstream: String,
+        repository: String,
+    },
     #[error("上流レジストリ '{upstream}' への認証に失敗しました")]
     Auth {
         upstream: String,
@@ -200,6 +207,13 @@ impl OciBlobSource {
     /// 未検証の `realm` へリクエストする経路（SSRF）を経由しない。
     /// `manifest` モジュールもマニフェストの取得で同じ認証解決を再利用する
     /// ため `pub(crate)`。
+    ///
+    /// REQ-0013 / REQ-0019: 認証情報を使う前に、認証情報なしで同じ範囲の
+    /// トークンを取得できるかを必ず確かめる。これに失敗すれば、たとえ
+    /// `upstream.credentials`（REQ-0016）で取得できたとしても
+    /// `AuthenticationRequired` を返し、それ以上（実際の取得も含めて）
+    /// 一切進めない。非公開イメージが、認証情報を持たない下流の利用者へ
+    /// 配信される経路になるのを防ぐため（保存の可否だけの判定ではない）。
     pub(crate) async fn resolve_auth(
         &self,
         upstream: &Upstream,
@@ -217,13 +231,44 @@ impl OciBlobSource {
                     service,
                     scope: Some(format!("repository:{repository}:pull")),
                 };
-                let token =
-                    registry_auth::fetch_bearer_token(&self.token_client, upstream, &challenge)
-                        .await
-                        .ok_or_else(|| BlobFetchError::UntrustedRealm {
-                            upstream: upstream.id.clone(),
-                            realm: challenge.realm.clone(),
-                        })?;
+                if !registry_auth::realm_is_trusted(upstream, &challenge.realm) {
+                    return Err(BlobFetchError::UntrustedRealm {
+                        upstream: upstream.id.clone(),
+                        realm: challenge.realm.clone(),
+                    });
+                }
+
+                let anonymous_token = registry_auth::fetch_bearer_token(
+                    &self.token_client,
+                    upstream,
+                    &challenge,
+                    None,
+                )
+                .await
+                .ok_or_else(|| BlobFetchError::AuthenticationRequired {
+                    upstream: upstream.id.clone(),
+                    repository: repository.to_string(),
+                })?;
+
+                // REQ-0016: 実際の取得には、設定されていれば運用者の認証
+                // 情報を使う（Docker Hub の要求回数制限緩和のため）。認証
+                // 情報が無ければ、上で確認した匿名トークンをそのまま使う
+                // （scope・realm は同一なので、もう一度問い合わせる必要が
+                // ない）。
+                let token = match upstream.credentials.as_ref() {
+                    Some(credentials) => registry_auth::fetch_bearer_token(
+                        &self.token_client,
+                        upstream,
+                        &challenge,
+                        Some(credentials),
+                    )
+                    .await
+                    .ok_or_else(|| BlobFetchError::UntrustedRealm {
+                        upstream: upstream.id.clone(),
+                        realm: challenge.realm.clone(),
+                    })?,
+                    None => anonymous_token,
+                };
                 Ok(RegistryAuth::Bearer(token))
             }
         }

@@ -9,7 +9,7 @@ mod memo;
 mod probe;
 mod router;
 
-pub use config::{RoutingConfig, Upstream};
+pub use config::{RoutingConfig, Upstream, UpstreamCredentials};
 pub use memo::{InMemoryRoutingMemo, RoutingMemoStore};
 pub use probe::{HttpUpstreamProbe, ProbeOutcome, UpstreamProbe};
 pub use router::{Resolution, ResolutionSource, Router, RoutingError};

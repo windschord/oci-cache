@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oci_cache::cache::{BlobCache, BlobSource, ManifestCache, ManifestReference, OciBlobSource};
-use oci_cache::routing::Upstream;
+use oci_cache::routing::{Upstream, UpstreamCredentials};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
-use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{header, header_exists, method, path};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 fn digest_of(content: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(content)))
@@ -512,4 +512,180 @@ async fn configured_ttl_overrides_default() {
     // 既定値のままなら再検証は起きないはずだが、設定した短い TTL が効いて
     // いれば再検証され、新しい内容に更新される
     assert_eq!(second.content, second_content);
+}
+
+struct MissingAuthorizationHeader;
+
+impl wiremock::Match for MissingAuthorizationHeader {
+    fn matches(&self, request: &Request) -> bool {
+        !request.headers.contains_key("authorization")
+    }
+}
+
+/// REQ-0016: 運用者が上流レジストリの認証情報を設定した時、その認証情報を
+/// 当該上流レジストリへの問い合わせに使う。
+#[tokio::test]
+async fn configured_credentials_used_for_upstream_request() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let content = b"gated behind configured credentials".to_vec();
+    let digest = digest_of(&content);
+    let realm = format!("{}/token", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="{realm}",service="registry.docker.io""#),
+        ))
+        .mount(&server)
+        .await;
+    // REQ-0013 / REQ-0019 の確認向け: 認証情報無しでもトークンを取得できる
+    // （＝公開イメージである）ことを先に確かめる
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(MissingAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": "anonymous-token",
+        })))
+        .mount(&server)
+        .await;
+    // 実際の取得では、設定した認証情報を使った問い合わせに切り替わる
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": "credentialed-token",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/blobs/{digest}")))
+        .and(header("authorization", "Bearer credentialed-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+        .mount(&server)
+        .await;
+
+    let upstream = Upstream::new("docker.io", server.uri())
+        .with_credentials(UpstreamCredentials::new("produser", "s3cr3t"));
+    let store_dir = tempdir().unwrap();
+    let cache = BlobCache::new(store_dir.path(), OciBlobSource::new());
+
+    let stored_path = cache.get(&upstream, repository, &digest).await.unwrap();
+
+    assert_eq!(tokio::fs::read(&stored_path).await.unwrap(), content);
+}
+
+/// REQ-0013: 上流レジストリから取得したイメージが認証情報なしでは取得
+/// できないものである時、その内容を保存しない。たとえ設定された認証情報
+/// なら取得できたとしても、非公開イメージを認証を持たない利用者へ配信
+/// する経路になるため、取得そのものを行わない。
+#[tokio::test]
+async fn authenticated_content_is_not_persisted() {
+    let server = MockServer::start().await;
+    let repository = "library/private";
+    let content = b"should never be persisted".to_vec();
+    let digest = digest_of(&content);
+    let hex = digest.strip_prefix("sha256:").unwrap();
+    let realm = format!("{}/token", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="{realm}",service="registry.docker.io""#),
+        ))
+        .mount(&server)
+        .await;
+    // 匿名でのトークン要求は拒否される（非公開リポジトリ）
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(MissingAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    // 設定した認証情報なら取得できてしまう状況を用意しておき、それが
+    // 使われていないことを確かめる
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": "credentialed-token",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/blobs/{digest}")))
+        .and(header("authorization", "Bearer credentialed-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+        .mount(&server)
+        .await;
+
+    let upstream = Upstream::new("docker.io", server.uri())
+        .with_credentials(UpstreamCredentials::new("produser", "s3cr3t"));
+    let store_dir = tempdir().unwrap();
+    let cache = BlobCache::new(store_dir.path(), OciBlobSource::new());
+
+    let result = cache.get(&upstream, repository, &digest).await;
+
+    assert!(result.is_err());
+    assert!(
+        !tokio::fs::try_exists(store_dir.path().join("blobs").join("sha256").join(hex))
+            .await
+            .unwrap()
+    );
+    // 認証情報を使った実際の取得が一切試みられていないことも確認する
+    let blob_path = format!("/v2/{repository}/blobs/{digest}");
+    let blob_requests = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path() == blob_path)
+        .count();
+    assert_eq!(blob_requests, 0);
+}
+
+/// REQ-0019: 認証情報を用いない問い合わせで取得できることを確認できた
+/// イメージは保存する。
+#[tokio::test]
+async fn persistence_requires_anonymous_pull_success() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let content = b"publicly available blob".to_vec();
+    let digest = digest_of(&content);
+    let realm = format!("{}/token", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="{realm}",service="registry.docker.io""#),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(MissingAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": "anonymous-token",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/blobs/{digest}")))
+        .and(header("authorization", "Bearer anonymous-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+        .mount(&server)
+        .await;
+
+    // 認証情報は設定しない
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let cache = BlobCache::new(store_dir.path(), OciBlobSource::new());
+
+    let stored_path = cache.get(&upstream, repository, &digest).await.unwrap();
+
+    assert_eq!(tokio::fs::read(&stored_path).await.unwrap(), content);
+    assert!(tokio::fs::try_exists(&stored_path).await.unwrap());
 }

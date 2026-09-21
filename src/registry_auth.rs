@@ -8,7 +8,7 @@
 use reqwest::Url;
 use serde::Deserialize;
 
-use crate::routing::Upstream;
+use crate::routing::{Upstream, UpstreamCredentials};
 
 pub struct BearerChallenge {
     pub realm: String,
@@ -77,10 +77,16 @@ struct TokenResponse {
 
 /// `realm` を検証したうえでトークンを取得する。信頼できない `realm` なら
 /// 何もリクエストせずに `None` を返す（SSRF 対策）。
+///
+/// `credentials` を渡すと、トークン要求に HTTP Basic 認証として付与する
+/// （REQ-0016）。呼び出し側は、非公開イメージを保存・配信しないための
+/// 判定（REQ-0013 / REQ-0019）を別途 `credentials: None` での呼び出しで
+/// 行う責任を持つ（`cache::blob::OciBlobSource::resolve_auth` 参照）。
 pub async fn fetch_bearer_token(
     token_client: &reqwest::Client,
     upstream: &Upstream,
     challenge: &BearerChallenge,
+    credentials: Option<&UpstreamCredentials>,
 ) -> Option<String> {
     if !realm_is_trusted(upstream, &challenge.realm) {
         return None;
@@ -92,12 +98,11 @@ pub async fn fetch_bearer_token(
     if let Some(scope) = &challenge.scope {
         query.push(("scope", scope.as_str()));
     }
-    let response = token_client
-        .get(&challenge.realm)
-        .query(&query)
-        .send()
-        .await
-        .ok()?;
+    let mut request = token_client.get(&challenge.realm).query(&query);
+    if let Some(credentials) = credentials {
+        request = request.basic_auth(&credentials.username, Some(&credentials.password));
+    }
+    let response = request.send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
