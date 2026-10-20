@@ -106,12 +106,21 @@ impl Layout {
         self.access
             .touch(digest, size)
             .map_err(redb_to_blob_error)?;
-        self.evict_if_needed().await
+        self.evict_if_needed(digest).await
     }
 
     /// REQ-0023: 保存済みデータの合計サイズが上限に達した時、最終参照時刻が
     /// 古い blob から順に削除する。
-    async fn evict_if_needed(&self) -> Result<(), BlobFetchError> {
+    ///
+    /// `protect` は直前に `touch` したばかりの digest（＝呼び出し元がこの
+    /// 直後にパスを返す blob）。`touch` は呼ぶたびに論理連番を進めるため
+    /// 通常は最も新しい（＝最も退避されにくい）扱いになるが、1個の blob
+    /// 単体で `capacity_bytes` を超える場合は、他に削れる blob が無くなった
+    /// 末尾で `protect` 自身が最古の候補として選ばれうる。それを削除すると
+    /// 呼び出し元が返そうとしているパスの実体が消え、直後の読み出しが
+    /// 失敗する（CodeRabbit レビュー指摘）。容量を満たせない場合は諦めて
+    /// 超過を許容する。
+    async fn evict_if_needed(&self, protect: &str) -> Result<(), BlobFetchError> {
         loop {
             let total = self.access.total_size().map_err(redb_to_blob_error)?;
             if total <= self.capacity_bytes {
@@ -126,6 +135,9 @@ impl Layout {
                 // なので、無限ループにせずここで諦める）
                 return Ok(());
             };
+            if digest == protect {
+                return Ok(());
+            }
             self.remove_blob(&digest).await?;
         }
     }
@@ -246,8 +258,16 @@ impl Layout {
     }
 
     /// 現在どの上流のどのタグからも（直接・間接に）辿れるダイジェストの集合。
+    ///
+    /// タグが直接指すダイジェストだけでなく、そこから `referenced_digests`
+    /// で新たに見つかったダイジェストも作業キューで再帰的に辿る。マニフェ
+    /// ストリスト（Image Index）がタグから指される場合、その子マニフェスト
+    /// 自体は1階層目で live に入るが、子マニフェストが参照する config・
+    /// layers は2階層目であり、1階層分しか辿らないと誤って回収してしまう
+    /// （CodeRabbit レビュー指摘）。
     async fn compute_live_set(&self) -> Result<HashSet<String>, BlobFetchError> {
         let mut live = HashSet::new();
+        let mut queue = Vec::new();
 
         let upstreams_dir = self.root.join("upstreams");
         let mut upstream_ids = Vec::new();
@@ -276,10 +296,15 @@ impl Layout {
                 .map_err(BlobFetchError::Io)?;
             for manifest_digest in digests {
                 if live.insert(manifest_digest.clone()) {
-                    // 同じマニフェストを複数のタグが指す場合に二重で読まない
-                    for referenced in self.referenced_digests(&manifest_digest).await {
-                        live.insert(referenced);
-                    }
+                    queue.push(manifest_digest);
+                }
+            }
+        }
+
+        while let Some(digest) = queue.pop() {
+            for referenced in self.referenced_digests(&digest).await {
+                if live.insert(referenced.clone()) {
+                    queue.push(referenced);
                 }
             }
         }

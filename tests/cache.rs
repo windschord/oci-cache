@@ -569,6 +569,53 @@ async fn stale_response_not_served_when_content_becomes_private() {
     assert!(result.is_err());
 }
 
+/// REQ-0013 相当のセキュリティ判断（続き）: 上流自体は匿名で応答する
+/// （`GET /v2/` は成功）が、個別のリポジトリが非公開化され、マニフェスト
+/// 取得そのものが HTTP 401 を返すようになった場合も、stale フォールバック
+/// せずエラーをそのまま返す（CodeRabbit レビュー指摘2回目: 上の
+/// `stale_response_not_served_when_content_becomes_private` は
+/// `resolve_auth`（トークン発行元の確認）での失敗だけを再現しており、
+/// `pull_manifest_raw` 自体が 401 を返す経路を見落としていた）。
+#[tokio::test(start_paused = true)]
+async fn stale_response_not_served_when_manifest_fetch_itself_is_unauthorized() {
+    let server = MockServer::start().await;
+    let repository = "library/nginx";
+    let tag = "latest";
+    let content = br#"{"schemaVersion":2,"was":"public"}"#.to_vec();
+
+    register_anonymous_v2(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/manifests/{tag}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // 以降は非公開化され、このリポジトリへの要求だけが 401 になる
+    // （上流全体の認証方式が変わったわけではない）
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repository}/manifests/{tag}")))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let upstream = Upstream::new("docker.io", server.uri());
+    let store_dir = tempdir().unwrap();
+    let cache = ManifestCache::new(store_dir.path(), OciBlobSource::new());
+    let reference = ManifestReference::Tag(tag.to_string());
+
+    let first = cache.get(&upstream, repository, &reference).await.unwrap();
+    assert_eq!(first.content, content);
+
+    tokio::time::advance(ManifestCache::DEFAULT_TAG_TTL + Duration::from_secs(1)).await;
+
+    let result = cache.get(&upstream, repository, &reference).await;
+
+    assert!(
+        result.is_err(),
+        "リポジトリが非公開化された後も保存済みの内容を stale として配信してしまっている"
+    );
+}
+
 /// REQ-0011: タグを指定してマニフェストを要求し、かつ保存済みマニフェスト
 /// の有効期間が経過している時、上流レジストリへ再問い合わせする。
 #[tokio::test(start_paused = true)]

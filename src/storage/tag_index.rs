@@ -22,6 +22,11 @@ struct ManifestDescriptor {
     media_type: String,
     digest: String,
     size: u64,
+    /// OCI の記述子では `annotations` は任意（REQ-0022 で参照する OCI
+    /// Image Layout の慣例上は `org.opencontainers.image.ref.name` を
+    /// 期待するが、仕様上は省略できる）。無い記述子も読み込めるよう既定値
+    /// を許す（CodeRabbit レビュー指摘）。
+    #[serde(default)]
     annotations: HashMap<String, String>,
 }
 
@@ -129,7 +134,14 @@ impl TagIndex {
 
     async fn read(&self) -> std::io::Result<IndexFile> {
         match tokio::fs::read(&self.path).await {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
+            // 解析に失敗した内容を空の索引として扱うと、以降の put/remove が
+            // それを「正しく読めた空の索引」として上書き保存し、既存の
+            // タグ記録を黙って失う。GC（`compute_live_set`）もこの索引を
+            // 空と誤認し、まだ参照されている blob を回収してしまう
+            // （CodeRabbit レビュー指摘）。壊れている場合は呼び出し元に
+            // エラーとして伝える。
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(IndexFile::default()),
             Err(err) => Err(err),
         }

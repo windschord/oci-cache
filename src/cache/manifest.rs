@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use oci_client::errors::{OciDistributionError, OciErrorCode};
 use oci_client::secrets::RegistryAuth;
 use oci_client::{Reference, RegistryOperation};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -265,11 +266,15 @@ impl ManifestCache {
             // 取得時点では公開だった内容が非公開化された場合に、認証情報を
             // 持たない利用者へ配信し続けてしまう（CodeRabbit レビュー指摘:
             // Authorization Bypass）。stale 応答は一時的な到達不能エラー
-            // （下の `Err(err)` 節）に限り、認証関連の失敗はそのまま返す。
-            Err(
-                err @ (BlobFetchError::AuthenticationRequired { .. }
-                | BlobFetchError::UntrustedRealm { .. }),
-            ) => Err(err),
+            // （下の `Err(err)` 節）に限り、認証・認可関連の失敗はそのまま
+            // 返す。`resolve_auth` 内の判定（`AuthenticationRequired` /
+            // `UntrustedRealm`）だけでなく、トークン登録（`client.auth`、
+            // `BlobFetchError::Auth`）や実際の取得（`pull_manifest_raw`、
+            // `BlobFetchError::Pull`）が 401/403 を返す経路も同じ Authorization
+            // Bypass になりうる（CodeRabbit レビュー指摘2回目: 匿名確認は
+            // 成功したが、このリポジトリ自体が非公開化された場合に、この
+            // 経路を見落としていた）。
+            Err(err) if is_authorization_denial(&err) => Err(err),
             Err(err) => {
                 // REQ-0014: 再検証（上流への問い合わせ）が失敗しても、
                 // 保存済みの内容があればそれを stale として返す。有効期限を
@@ -302,5 +307,35 @@ impl ManifestCache {
     async fn read_stored(&self, digest: &str) -> Result<Vec<u8>, BlobFetchError> {
         let path = self.digest_store.blob_path(digest)?;
         tokio::fs::read(&path).await.map_err(BlobFetchError::Io)
+    }
+}
+
+/// `err` が認証・認可の拒否（≒非公開化）を表すかを判定する。
+///
+/// `resolve_auth` 内で検出される `AuthenticationRequired` / `UntrustedRealm`
+/// だけでなく、匿名確認（`GET /v2/`）自体は成功したがこのリポジトリ個別に
+/// 401/403 が返る経路（`client.auth` の `BlobFetchError::Auth`、
+/// `pull_manifest_raw` の `BlobFetchError::Pull`）も同じ Authorization
+/// Bypass になりうる（CodeRabbit レビュー指摘）。これらを一時的な到達不能
+/// エラーと区別せずに stale フォールバックすると、非公開化された内容を
+/// 認証情報を持たない利用者へ配信し続けてしまう。
+fn is_authorization_denial(err: &BlobFetchError) -> bool {
+    match err {
+        BlobFetchError::AuthenticationRequired { .. }
+        | BlobFetchError::UntrustedRealm { .. }
+        | BlobFetchError::Auth { .. } => true,
+        BlobFetchError::Pull { source, .. } => is_unauthorized_or_denied(source),
+        _ => false,
+    }
+}
+
+fn is_unauthorized_or_denied(err: &OciDistributionError) -> bool {
+    match err {
+        OciDistributionError::UnauthorizedError { .. } => true,
+        OciDistributionError::RegistryError { envelope, .. } => envelope
+            .errors
+            .iter()
+            .any(|e| matches!(e.code, OciErrorCode::Unauthorized | OciErrorCode::Denied)),
+        _ => false,
     }
 }

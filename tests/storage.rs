@@ -190,6 +190,29 @@ async fn eviction_removes_least_recently_used_blob() {
     );
 }
 
+/// REQ-0023（続き）: 単体で容量上限を超える blob を保存した直後、退避処理が
+/// その blob 自身を削除してしまわないことを確認する（CodeRabbit レビュー
+/// 指摘: `touch` した直後の digest は通常もっとも新しく退避されにくいが、
+/// 他に削れる blob が無くなった末尾では自分自身が最古の候補として選ばれ
+/// うる。削除すると呼び出し元に返すパスの実体が消える）。
+#[tokio::test]
+async fn freshly_stored_blob_exceeding_capacity_alone_is_not_evicted() {
+    let root = tempdir().unwrap();
+    let content = vec![0xCCu8; 100];
+    let digest = digest_of(&content);
+
+    // どの blob 単体の容量（100バイト）よりも小さい上限にする
+    let layout = Layout::new(root.path(), Some(10)).unwrap();
+
+    let path = layout.store_blob(&digest, &content).await.unwrap();
+
+    assert_eq!(
+        tokio::fs::read(&path).await.unwrap(),
+        content,
+        "保存した直後の blob が、自分自身の退避によって消えている"
+    );
+}
+
 /// REQ-0024: 上流レジストリから blob を取得した時、受信した内容から計算
 /// したダイジェストが要求したダイジェストと一致しない場合、その内容を
 /// 保存せず誤りを返す。
@@ -307,6 +330,109 @@ async fn unreferenced_blob_is_collected() {
     assert!(exists(&new_manifest_digest));
     assert!(exists(&new_config_digest));
     assert!(exists(&new_layer_digest));
+}
+
+/// REQ-0025（続き）: タグが Image Index（マニフェストリスト）を指す場合、
+/// その子マニフェストが参照する config・layers（2階層目）も GC で回収
+/// されない（CodeRabbit レビュー指摘: 到達判定が1階層しか辿っていないと、
+/// 子マニフェスト自身は live のまま、その config・layers だけ誤って
+/// 回収してしまう）。
+#[tokio::test]
+async fn gc_preserves_layers_referenced_through_image_index() {
+    let root = tempdir().unwrap();
+    let layout = Layout::new(root.path(), Some(u64::MAX)).unwrap();
+    let repo = "library/nginx";
+    let tag = "latest";
+
+    let config = b"amd64 config".to_vec();
+    let config_digest = digest_of(&config);
+    let layer = b"amd64 layer content".to_vec();
+    let layer_digest = digest_of(&layer);
+    let child_manifest_bytes = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "config": {"digest": config_digest, "mediaType": "application/vnd.oci.image.config.v1+json", "size": 0},
+        "layers": [{"digest": layer_digest, "mediaType": "application/vnd.oci.image.layer.v1.tar", "size": 0}],
+    }))
+    .unwrap();
+    let child_manifest_digest = digest_of(&child_manifest_bytes);
+
+    let index_bytes = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{"digest": child_manifest_digest, "mediaType": "application/vnd.oci.image.manifest.v1+json", "size": 0, "platform": {"architecture": "amd64", "os": "linux"}}],
+    }))
+    .unwrap();
+    let index_digest = digest_of(&index_bytes);
+
+    layout.store_blob(&config_digest, &config).await.unwrap();
+    layout.store_blob(&layer_digest, &layer).await.unwrap();
+    layout
+        .store_blob(&child_manifest_digest, &child_manifest_bytes)
+        .await
+        .unwrap();
+    layout
+        .store_blob(&index_digest, &index_bytes)
+        .await
+        .unwrap();
+    layout
+        .put_tag("docker.io", repo, tag, &index_digest)
+        .await
+        .unwrap();
+
+    // put_tag 自身は置き換え前が無い（初回）ため GC を起こさない。到達
+    // 判定そのものを確認したいので、ここで明示的に呼ぶ。
+    layout.collect_garbage().await.unwrap();
+
+    let blobs_dir = root.path().join("blobs/sha256");
+    let exists = |digest: &str| {
+        blobs_dir
+            .join(digest.strip_prefix("sha256:").unwrap())
+            .exists()
+    };
+
+    assert!(exists(&index_digest));
+    assert!(
+        exists(&child_manifest_digest),
+        "Image Index の子マニフェストが回収されている"
+    );
+    assert!(
+        exists(&config_digest),
+        "子マニフェストが参照する config が誤って回収されている"
+    );
+    assert!(
+        exists(&layer_digest),
+        "子マニフェストが参照する layer が誤って回収されている"
+    );
+}
+
+/// REQ-0022（続き）: タグ索引（`index.json`）が壊れている（解析できない）
+/// 場合、空の索引として黙って読み替えず、エラーとして伝える（CodeRabbit
+/// レビュー指摘: 黙って読み替えると、以降の書き込みが既存のタグ記録を
+/// 上書きして失い、GC がまだ参照されている blob を誤って回収しうる）。
+#[tokio::test]
+async fn corrupted_tag_index_is_reported_as_error_not_silently_reset() {
+    let root = tempdir().unwrap();
+    let layout = Layout::new(root.path(), Some(u64::MAX)).unwrap();
+    let repo = "library/nginx";
+    let tag = "latest";
+    let digest = digest_of(b"some manifest content");
+
+    layout
+        .put_tag("docker.io", repo, tag, &digest)
+        .await
+        .unwrap();
+
+    let index_path = root.path().join("upstreams/docker.io/index.json");
+    tokio::fs::write(&index_path, b"not valid json")
+        .await
+        .unwrap();
+
+    let result = layout.get_tag("docker.io", repo, tag).await;
+
+    assert!(
+        result.is_err(),
+        "壊れた index.json を空の索引として読み替えてしまっている"
+    );
 }
 
 /// REQ-0026: 保存領域の使用量の既定の上限は、保存先ファイルシステムの
