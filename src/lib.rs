@@ -7,3 +7,4 @@ pub mod cache;
 mod registry_auth;
 pub mod routing;
 pub mod server;
+pub mod storage;

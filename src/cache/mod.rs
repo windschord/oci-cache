@@ -7,8 +7,11 @@
 //! （`crate::routing`）が終わった後、この段階で実際に blob・マニフェスト
 //! を取得・保存する。
 //!
-//! OCI Image Layout による永続化（REQ-0020 〜 REQ-0022）は、次のフェーズ
-//! （README の実装順序 3.）で扱う。
+//! OCI Image Layout による永続化（REQ-0020 〜 REQ-0029）は `crate::storage`
+//! として実装済みだが、この `cache` モジュール（`ManifestCache` のタグ
+//! 状態、`BlobCache` の保存）はまだそれを経由せず、再起動で失われる
+//! 前提のまま・容量による退避も行わない。`crate::server::AppState` を
+//! `crate::storage::Layout` で置き換える結線は別途行う。
 
 mod blob;
 mod manifest;
