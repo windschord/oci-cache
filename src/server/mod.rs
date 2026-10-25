@@ -20,11 +20,12 @@ use axum::Router as AxumRouter;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::cache::{
-    BlobCache, ManifestCache, ManifestFetchError, ManifestReference, OciBlobSource,
+    BlobCache, BlobFetchError, ManifestCache, ManifestFetchError, ManifestReference, OciBlobSource,
 };
 use crate::routing::{
     HttpUpstreamProbe, InMemoryRoutingMemo, Router as UpstreamRouter, RoutingConfig, RoutingError,
 };
+use oci_client::errors::{OciDistributionError, OciErrorCode};
 
 mod tls;
 
@@ -157,7 +158,7 @@ async fn handle_v2_request(
                 Err(ManifestFetchError::NotAcceptable) => {
                     StatusCode::NOT_ACCEPTABLE.into_response()
                 }
-                Err(ManifestFetchError::Blob(_)) => StatusCode::BAD_GATEWAY.into_response(),
+                Err(ManifestFetchError::Blob(err)) => upstream_error_status(&err).into_response(),
             }
         }
         "blobs" => match state.blob_cache.get(upstream, repository, reference).await {
@@ -169,9 +170,46 @@ async fn handle_v2_request(
                     .and_then(|value| value.to_str().ok());
                 serve_file(&path, range).await
             }
-            Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+            Err(err) => upstream_error_status(&err).into_response(),
         },
         _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// 上流から取得できなかった時に返す応答を決める。上流自体に該当する
+/// マニフェスト・blob・リポジトリが無い場合は 404 を返す。OCI Distribution
+/// Specification は存在しない対象に 404 を要求しており、502 はゲートウェイ
+/// 障害を示すためクライアントが一時的な障害として再試行するおそれがある
+/// （CodeRabbit レビュー指摘）。それ以外の失敗（接続不能・認証拒否等）は
+/// 502 のままにする。
+fn upstream_error_status(err: &BlobFetchError) -> StatusCode {
+    match err {
+        BlobFetchError::Pull { source, .. } if is_upstream_not_found(source) => {
+            StatusCode::NOT_FOUND
+        }
+        _ => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// `oci-client` は blob とマニフェストで上流の 404 を異なる形に包む。
+/// マニフェスト取得（`pull_manifest_raw`）は本文を OCI のエラー封筒として
+/// 解釈するため `RegistryError` になるが、blob 取得（`pull_blob_stream`）は
+/// `reqwest::Response::error_for_status` を経由するため本文を解釈せず
+/// `RequestError` になる。両方を見なければ blob の 404 を取り落とす。
+fn is_upstream_not_found(err: &OciDistributionError) -> bool {
+    match err {
+        OciDistributionError::RequestError(err) => {
+            err.status() == Some(reqwest::StatusCode::NOT_FOUND)
+        }
+        OciDistributionError::RegistryError { envelope, .. } => envelope.errors.iter().any(|e| {
+            matches!(
+                e.code,
+                OciErrorCode::ManifestUnknown
+                    | OciErrorCode::BlobUnknown
+                    | OciErrorCode::NameUnknown
+            )
+        }),
+        _ => false,
     }
 }
 

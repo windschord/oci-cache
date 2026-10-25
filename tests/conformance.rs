@@ -293,6 +293,49 @@ async fn manifest_media_type_negotiation() {
     assert_eq!(unsupported_response.status(), StatusCode::NOT_ACCEPTABLE);
 }
 
+/// 上流に存在しないマニフェスト・blob を要求した時、システムは 502（上流
+/// 障害）ではなく 404 を返さなければならない（OCI Distribution
+/// Specification の要求。CodeRabbit レビュー指摘: 存在しないタグへの要求を
+/// 502 として返すと、クライアントが一時的な障害として再試行してしまう）。
+#[tokio::test]
+async fn upstream_not_found_is_reported_as_404_not_502() {
+    let server = MockServer::start().await;
+    let repo = "library/nginx";
+    register_anonymous_v2(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/manifests/missing")))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "errors": [{"code": "MANIFEST_UNKNOWN", "message": "manifest unknown"}],
+        })))
+        .mount(&server)
+        .await;
+    let missing_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/blobs/{missing_digest}")))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "errors": [{"code": "BLOB_UNKNOWN", "message": "blob unknown"}],
+        })))
+        .mount(&server)
+        .await;
+
+    let app = single_upstream_app(&server);
+
+    let manifest_request = HttpRequest::builder()
+        .uri(format!("/v2/{repo}/manifests/missing?ns=docker.io"))
+        .body(Body::empty())
+        .unwrap();
+    let manifest_response = app.clone().oneshot(manifest_request).await.unwrap();
+    assert_eq!(manifest_response.status(), StatusCode::NOT_FOUND);
+
+    let blob_request = HttpRequest::builder()
+        .uri(format!("/v2/{repo}/blobs/{missing_digest}?ns=docker.io"))
+        .body(Body::empty())
+        .unwrap();
+    let blob_response = app.oneshot(blob_request).await.unwrap();
+    assert_eq!(blob_response.status(), StatusCode::NOT_FOUND);
+}
+
 /// REQ-0035: クライアントが Range ヘッダを指定して blob を要求した時、
 /// システムは指定された範囲のみを返さなければならない。
 #[tokio::test]

@@ -434,23 +434,65 @@ impl ManifestCache {
 /// Bypass になりうる（CodeRabbit レビュー指摘）。これらを一時的な到達不能
 /// エラーと区別せずに stale フォールバックすると、非公開化された内容を
 /// 認証情報を持たない利用者へ配信し続けてしまう。
+///
+/// `BlobFetchError::Auth` は `client.auth()`（トークンの登録）の失敗を
+/// 包むが、その原因は認可拒否に限らない（ネットワーク断・応答の解釈
+/// 失敗等も同じ型で返る）ため、`Pull` と同様に `source` の内容で判定する
+/// （CodeRabbit レビュー指摘2回目: 一律に認可拒否と断定すると、本来は
+/// stale で救えたはずの一時的な失敗まで即時エラーにしてしまう）。
 fn is_authorization_denial(err: &BlobFetchError) -> bool {
     match err {
-        BlobFetchError::AuthenticationRequired { .. }
-        | BlobFetchError::UntrustedRealm { .. }
-        | BlobFetchError::Auth { .. } => true,
-        BlobFetchError::Pull { source, .. } => is_unauthorized_or_denied(source),
+        BlobFetchError::AuthenticationRequired { .. } | BlobFetchError::UntrustedRealm { .. } => {
+            true
+        }
+        BlobFetchError::Auth { source, .. } | BlobFetchError::Pull { source, .. } => {
+            is_unauthorized_or_denied(source)
+        }
         _ => false,
     }
 }
 
 fn is_unauthorized_or_denied(err: &OciDistributionError) -> bool {
     match err {
+        // `client.auth()` 内部のトークン要求が非 200 を返した場合
+        // （トークン発行元が認可を拒否した場合）。
+        OciDistributionError::AuthenticationFailure(_) => true,
         OciDistributionError::UnauthorizedError { .. } => true,
         OciDistributionError::RegistryError { envelope, .. } => envelope
             .errors
             .iter()
             .any(|e| matches!(e.code, OciErrorCode::Unauthorized | OciErrorCode::Denied)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `client.auth()` に `RegistryAuth::Bearer` を渡す現在の呼び方では
+    // 常に即座に成功する（oci-client の `_auth` は Bearer を渡された場合
+    // ネットワークに触れず値をそのまま返す）ため、`BlobFetchError::Auth`
+    // は結合テストでは再現できない。判定ロジックそのものを単体で確認する。
+
+    #[test]
+    fn authentication_failure_is_treated_as_authorization_denial() {
+        let err = BlobFetchError::Auth {
+            upstream: "docker.io".to_string(),
+            source: OciDistributionError::AuthenticationFailure("denied".to_string()),
+        };
+        assert!(is_authorization_denial(&err));
+    }
+
+    #[test]
+    fn transient_auth_registration_failure_is_not_treated_as_authorization_denial() {
+        // CodeRabbit レビュー指摘: `BlobFetchError::Auth` を一律に認可拒否と
+        // 断定すると、認可とは無関係な一時的な失敗（ここでは汎用エラーで
+        // 代用）まで stale フォールバックの対象外にしてしまう。
+        let err = BlobFetchError::Auth {
+            upstream: "docker.io".to_string(),
+            source: OciDistributionError::GenericError(Some("timeout".to_string())),
+        };
+        assert!(!is_authorization_denial(&err));
     }
 }
