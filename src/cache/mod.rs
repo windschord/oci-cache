@@ -17,4 +17,4 @@ mod blob;
 mod manifest;
 
 pub use blob::{BlobCache, BlobFetchError, BlobSource, OciBlobSource};
-pub use manifest::{ManifestCache, ManifestReference, ManifestResponse};
+pub use manifest::{ManifestCache, ManifestFetchError, ManifestReference, ManifestResponse};

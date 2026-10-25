@@ -26,12 +26,13 @@ use crate::routing::Upstream;
 
 use super::blob::{BlobCache, BlobFetchError, BlobSource, OciBlobSource};
 
-/// マニフェストの取得で受け入れるメディアタイプ。
+/// マニフェストの取得で受け入れるメディアタイプの既定値。
 ///
-/// 仕様準拠フェーズ（REQ-0033: Accept ヘッダによるネゴシエーション）までは
-/// クライアントの Accept を反映せず、Docker/OCI の単一マニフェストと
-/// マニフェストリストの双方を固定で受け入れる。
-const ACCEPTED_MEDIA_TYPES: &[&str] = &[
+/// クライアントが Accept ヘッダで範囲を絞らなかった場合（REQ-0033）は、
+/// Docker/OCI の単一マニフェストとマニフェストリストの双方を受け入れる。
+/// `server` モジュールがクライアントの Accept ヘッダと照合するため
+/// `pub(crate)`。
+pub(crate) const ACCEPTED_MEDIA_TYPES: &[&str] = &[
     oci_client::manifest::OCI_IMAGE_INDEX_MEDIA_TYPE,
     oci_client::manifest::OCI_IMAGE_MEDIA_TYPE,
     oci_client::manifest::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
@@ -53,6 +54,43 @@ pub struct ManifestResponse {
     /// REQ-0014: 上流への再検証に失敗し、保存済みの内容をそのまま返した
     /// 場合に `true`。
     pub stale: bool,
+    /// 本文の `mediaType` フィールド（REQ-0033 の Content-Type 応答・
+    /// Accept との適合判定に使う）。本文が解釈できない、または
+    /// `mediaType` を含まない場合は `None`。
+    pub media_type: Option<String>,
+}
+
+/// マニフェストの取得に伴う失敗。[`BlobFetchError`] に加えて、クライアント
+/// が指定した Accept の範囲に収まるメディアタイプを提供できない場合
+/// （REQ-0033）を区別する。
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestFetchError {
+    #[error(transparent)]
+    Blob(#[from] BlobFetchError),
+    #[error("クライアントが指定した Accept ヘッダに合致するメディアタイプのマニフェストを提供できません")]
+    NotAcceptable,
+}
+
+/// 本文から `mediaType` フィールドを取り出す。解釈できない、または
+/// フィールドが無ければ `None`（REQ-0033: 無ければ Accept で制限しない）。
+fn parse_media_type(content: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(content)
+        .ok()?
+        .get("mediaType")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// `media_type` が `accept`（クライアントが指定した Accept の範囲）に
+/// 収まっているかを判定する。`accept` が `None`（Accept 指定なし、または
+/// `*/*`）なら常に適合する。`media_type` が不明なら保守的に適合させる
+/// （どの範囲にも収まらないと断定する根拠が無いため）。
+fn is_acceptable(media_type: Option<&str>, accept: Option<&[&str]>) -> bool {
+    match (media_type, accept) {
+        (_, None) => true,
+        (None, Some(_)) => true,
+        (Some(media_type), Some(accept)) => accept.contains(&media_type),
+    }
 }
 
 /// マニフェストの取得。blob の取得（[`OciBlobSource`]）と上流ごとの
@@ -71,6 +109,7 @@ impl OciManifestSource {
         upstream: &Upstream,
         repository: &str,
         reference: &Reference,
+        accepted_media_types: &[&str],
     ) -> Result<(bytes::Bytes, String), BlobFetchError> {
         let auth = self.inner.resolve_auth(upstream, repository).await?;
         let (client, _registry) = self.inner.client_and_registry(upstream)?;
@@ -95,7 +134,7 @@ impl OciManifestSource {
         }
 
         client
-            .pull_manifest_raw(reference, &auth, ACCEPTED_MEDIA_TYPES)
+            .pull_manifest_raw(reference, &auth, accepted_media_types)
             .await
             .map_err(|source| BlobFetchError::Pull {
                 upstream: upstream.id.clone(),
@@ -105,19 +144,28 @@ impl OciManifestSource {
 
     /// タグ参照で取得する（REQ-0011 の再検証で使う）。呼び出し側が結果を
     /// ダイジェストを鍵として保存するため、ダイジェストも合わせて返す。
+    /// `accepted_media_types` はクライアントの Accept ヘッダと交差させた
+    /// 範囲（REQ-0033）。タグの指す先は Accept によって変わりうるため、
+    /// 上流への問い合わせ自体をこの範囲に絞る。
     async fn fetch_by_tag(
         &self,
         upstream: &Upstream,
         repository: &str,
         tag: &str,
+        accepted_media_types: &[&str],
     ) -> Result<(bytes::Bytes, String), BlobFetchError> {
         let (_client, registry) = self.inner.client_and_registry(upstream)?;
         let reference = Reference::with_tag(registry, repository.to_string(), tag.to_string());
-        self.pull(upstream, repository, &reference).await
+        self.pull(upstream, repository, &reference, accepted_media_types)
+            .await
     }
 
     /// ダイジェスト参照で取得する（REQ-0012、`BlobSource` 経由で
-    /// `BlobCache` から呼ばれる）。
+    /// `BlobCache` から呼ばれる）。内容はダイジェストで不変に決まるため、
+    /// クライアントの Accept では上流への問い合わせを絞らず、常に既定の
+    /// 全範囲（`ACCEPTED_MEDIA_TYPES`）で取得する。Accept との適合判定は
+    /// 呼び出し側（[`ManifestCache::get_filtered`]）が取得後の内容に対して
+    /// 行う。
     async fn fetch_by_digest(
         &self,
         upstream: &Upstream,
@@ -127,7 +175,9 @@ impl OciManifestSource {
         let (_client, registry) = self.inner.client_and_registry(upstream)?;
         let reference =
             Reference::with_digest(registry, repository.to_string(), digest.to_string());
-        let (content, _returned_digest) = self.pull(upstream, repository, &reference).await?;
+        let (content, _returned_digest) = self
+            .pull(upstream, repository, &reference, ACCEPTED_MEDIA_TYPES)
+            .await?;
         Ok(content)
     }
 }
@@ -210,19 +260,49 @@ impl ManifestCache {
         repository: &str,
         reference: &ManifestReference,
     ) -> Result<ManifestResponse, BlobFetchError> {
+        match self
+            .get_filtered(upstream, repository, reference, None)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(ManifestFetchError::Blob(err)) => Err(err),
+            // `accept: None` は常に適合させる（`is_acceptable` 参照）ため、
+            // この枝には到達しない。
+            Err(ManifestFetchError::NotAcceptable) => {
+                unreachable!("accept が None の取得は NotAcceptable を返さない")
+            }
+        }
+    }
+
+    /// REQ-0033: クライアントが Accept ヘッダで範囲を絞った場合
+    /// （`accept: Some(..)`）、その範囲に収まるメディアタイプのマニフェスト
+    /// だけを返す。`None` は範囲指定なし（既定の全範囲を許容）を表す。
+    pub async fn get_filtered(
+        &self,
+        upstream: &Upstream,
+        repository: &str,
+        reference: &ManifestReference,
+        accept: Option<&[&str]>,
+    ) -> Result<ManifestResponse, ManifestFetchError> {
         match reference {
             // REQ-0012: ダイジェスト参照は保存済みなら有効期間を確認せずに
-            // 応答する（`BlobCache::get` がその判定を担う）。
+            // 応答する（`BlobCache::get` がその判定を担う）。内容は不変なので
+            // 上流への問い合わせ自体は絞らず、取得後に Accept と照合する。
             ManifestReference::Digest(digest) => {
                 let path = self.digest_store.get(upstream, repository, digest).await?;
                 let content = tokio::fs::read(&path).await.map_err(BlobFetchError::Io)?;
+                let media_type = parse_media_type(&content);
+                if !is_acceptable(media_type.as_deref(), accept) {
+                    return Err(ManifestFetchError::NotAcceptable);
+                }
                 Ok(ManifestResponse {
                     content,
                     digest: digest.clone(),
                     stale: false,
+                    media_type,
                 })
             }
-            ManifestReference::Tag(tag) => self.get_by_tag(upstream, repository, tag).await,
+            ManifestReference::Tag(tag) => self.get_by_tag(upstream, repository, tag, accept).await,
         }
     }
 
@@ -231,22 +311,51 @@ impl ManifestCache {
         upstream: &Upstream,
         repository: &str,
         tag: &str,
-    ) -> Result<ManifestResponse, BlobFetchError> {
+        accept: Option<&[&str]>,
+    ) -> Result<ManifestResponse, ManifestFetchError> {
         let key = (upstream.id.clone(), repository.to_string(), tag.to_string());
         let now = tokio::time::Instant::now();
 
-        // REQ-0011: 有効期間が残っていれば、保存済みの内容をそのまま返す
+        // REQ-0033: 上流への問い合わせはクライアントの Accept と既定の全
+        // 範囲の交差に絞る。交差が空なら、そもそも提供できるメディア
+        // タイプが無いということなので上流へ問い合わせずに拒否する。
+        let fetch_types: Vec<&str> = match accept {
+            Some(requested) => {
+                let intersected: Vec<&str> = ACCEPTED_MEDIA_TYPES
+                    .iter()
+                    .copied()
+                    .filter(|supported| requested.contains(supported))
+                    .collect();
+                if intersected.is_empty() {
+                    return Err(ManifestFetchError::NotAcceptable);
+                }
+                intersected
+            }
+            None => ACCEPTED_MEDIA_TYPES.to_vec(),
+        };
+
+        // REQ-0011: 有効期間が残っていれば、保存済みの内容をそのまま返す。
+        // ただし保存済みの内容が今回の Accept に適合しない場合は、新鮮で
+        // あっても使えないため上流へ取り直す（下へ続く）。
         if let Some(state) = self.fresh_tag_state(&key, now) {
             if let Ok(content) = self.read_stored(&state.digest).await {
-                return Ok(ManifestResponse {
-                    content,
-                    digest: state.digest,
-                    stale: false,
-                });
+                let media_type = parse_media_type(&content);
+                if is_acceptable(media_type.as_deref(), accept) {
+                    return Ok(ManifestResponse {
+                        content,
+                        digest: state.digest,
+                        stale: false,
+                        media_type,
+                    });
+                }
             }
         }
 
-        match self.source.fetch_by_tag(upstream, repository, tag).await {
+        match self
+            .source
+            .fetch_by_tag(upstream, repository, tag, &fetch_types)
+            .await
+        {
             Ok((content, digest)) => {
                 self.digest_store.store(&digest, &content).await?;
                 self.tag_state.lock().unwrap().insert(
@@ -257,6 +366,7 @@ impl ManifestCache {
                     },
                 );
                 Ok(ManifestResponse {
+                    media_type: parse_media_type(&content),
                     content: content.to_vec(),
                     digest,
                     stale: false,
@@ -274,23 +384,28 @@ impl ManifestCache {
             // Bypass になりうる（CodeRabbit レビュー指摘2回目: 匿名確認は
             // 成功したが、このリポジトリ自体が非公開化された場合に、この
             // 経路を見落としていた）。
-            Err(err) if is_authorization_denial(&err) => Err(err),
+            Err(err) if is_authorization_denial(&err) => Err(err.into()),
             Err(err) => {
                 // REQ-0014: 再検証（上流への問い合わせ）が失敗しても、
                 // 保存済みの内容があればそれを stale として返す。有効期限を
                 // 過ぎていても、より新しい内容が確認できなかっただけなので
-                // 使ってよい。
+                // 使ってよい。ただし Accept に適合しない内容は、取得できる
+                // 保証が無い以上 stale としても返さない。
                 let stored = self.tag_state.lock().unwrap().get(&key).cloned();
                 if let Some(state) = stored {
                     if let Ok(content) = self.read_stored(&state.digest).await {
-                        return Ok(ManifestResponse {
-                            content,
-                            digest: state.digest,
-                            stale: true,
-                        });
+                        let media_type = parse_media_type(&content);
+                        if is_acceptable(media_type.as_deref(), accept) {
+                            return Ok(ManifestResponse {
+                                content,
+                                digest: state.digest,
+                                stale: true,
+                                media_type,
+                            });
+                        }
                     }
                 }
-                Err(err)
+                Err(err.into())
             }
         }
     }
