@@ -34,9 +34,11 @@ jobs:
       - name: PyYAML の導入
         run: pip install --disable-pip-version-check pyyaml
 
-      # --check-tests は tests/ が揃った時点で有効化する（CLAUDE.md 参照）
+      # 全フェーズ（REQ-0040〜0047 を含む）の verification.ref に対応する
+      # テストファイルが揃ったため --check-tests を有効化した
+      # （CLAUDE.md 参照）。以降、要求を追加する際はテストも同じ PR に含める。
       - name: 矛盾・欠落の検査
-        run: python3 scripts/reqctl.py validate --strict
+        run: python3 scripts/reqctl.py validate --strict --check-tests
 
       # generated/ は手で編集しない決まりなので、再生成して差分が出るなら
       # YAML の変更が生成物へ反映されていない

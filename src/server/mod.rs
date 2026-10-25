@@ -9,14 +9,15 @@
 //! ため、他のメソッドは axum の既定動作により HTTP 405（REQ-0036）になる。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Path as PathExtractor, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router as AxumRouter;
+use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::cache::{
@@ -25,6 +26,8 @@ use crate::cache::{
 use crate::routing::{
     HttpUpstreamProbe, InMemoryRoutingMemo, Router as UpstreamRouter, RoutingConfig, RoutingError,
 };
+use crate::storage::Layout;
+use crate::ui::{CacheStats, RefreshGate};
 use oci_client::errors::{OciDistributionError, OciErrorCode};
 
 mod tls;
@@ -47,27 +50,79 @@ const CONTENT_TYPE: &str = "Content-Type";
 const DEFAULT_MANIFEST_MEDIA_TYPE: &str = oci_client::manifest::OCI_IMAGE_MEDIA_TYPE;
 
 /// クライアントからの要求を捌くのに必要な状態一式。
+///
+/// `layout`（REQ-0020〜0029）はカタログ（REQ-0040 / 0041）のタグ記録と
+/// GC のためだけに使う。blob・マニフェストの実際の取得・保存は引き続き
+/// `blob_cache` / `manifest_cache` が担う（同じ `root` を指すため、
+/// blob の保存先自体は共有される。容量による退避を実際の配信経路に
+/// 載せる結線は別途行う）。
 pub struct AppState {
     router: UpstreamRouter<HttpUpstreamProbe, Arc<InMemoryRoutingMemo>>,
     upstreams: RoutingConfig,
     blob_cache: BlobCache<OciBlobSource>,
     manifest_cache: ManifestCache,
+    layout: Layout,
+    stats: CacheStats,
+    refresh_gate: RefreshGate,
+    prometheus_handle: PrometheusHandle,
+    root: PathBuf,
 }
 
 impl AppState {
-    pub fn new(config: RoutingConfig, root: impl Into<std::path::PathBuf>) -> Self {
+    pub fn new(config: RoutingConfig, root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let probe = HttpUpstreamProbe::new(reqwest::Client::new());
         let memo = Arc::new(InMemoryRoutingMemo::default());
         let router = UpstreamRouter::new(config.clone(), probe, memo);
         let blob_cache = BlobCache::new(root.clone(), OciBlobSource::new());
-        let manifest_cache = ManifestCache::new(root, OciBlobSource::new());
+        let manifest_cache = ManifestCache::new(root.clone(), OciBlobSource::new());
+        let layout = crate::ui::new_layout(root.clone());
         Self {
             router,
             upstreams: config,
             blob_cache,
             manifest_cache,
+            layout,
+            stats: CacheStats::default(),
+            refresh_gate: RefreshGate::default(),
+            prometheus_handle: crate::ui::prometheus_handle(),
+            root,
         }
+    }
+
+    /// REQ-0046: 既定値ではなく運用者が設定した抑止時間を使う
+    /// （`ManifestCache::with_tag_ttl` と同じ、既定値の上書きという形）。
+    pub fn with_refresh_cooldown(mut self, cooldown: std::time::Duration) -> Self {
+        self.refresh_gate = RefreshGate::new(cooldown);
+        self
+    }
+
+    pub(crate) fn upstreams(&self) -> &RoutingConfig {
+        &self.upstreams
+    }
+
+    pub(crate) fn manifest_cache(&self) -> &ManifestCache {
+        &self.manifest_cache
+    }
+
+    pub(crate) fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    pub(crate) fn stats(&self) -> &CacheStats {
+        &self.stats
+    }
+
+    pub(crate) fn refresh_gate(&self) -> &RefreshGate {
+        &self.refresh_gate
+    }
+
+    pub(crate) fn prometheus_handle(&self) -> &PrometheusHandle {
+        &self.prometheus_handle
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 }
 
@@ -81,6 +136,16 @@ pub fn build_router(state: AppState) -> AxumRouter {
     AxumRouter::new()
         .route("/v2/", get(handle_base_check))
         .route("/v2/{*rest}", get(handle_v2_request))
+        // REQ-0040〜0047 / REQ-0017 / REQ-0044: Web UI と観測。
+        // `crate::ui` が実装を持つ（`crate::server` は OCI のエンドポイント
+        // に専念させる）。
+        .route("/api/catalog", get(crate::ui::get_catalog))
+        .route("/api/stats", get(crate::ui::get_stats))
+        .route("/api/refresh", post(crate::ui::post_refresh))
+        .route("/metrics", get(crate::ui::get_metrics))
+        // REQ-0043: 埋め込んだ Web UI の静的資産。上記以外の経路すべてを
+        // 受け、`/` は `index.html` に読み替える。
+        .fallback(get(crate::ui::serve_asset))
         .with_state(Arc::new(state))
 }
 
@@ -142,6 +207,19 @@ async fn handle_v2_request(
                 .await
             {
                 Ok(response) => {
+                    // REQ-0042: 命中・不命中を記録する。
+                    state.stats.record_manifest(response.hit);
+                    // REQ-0040 / REQ-0041: タグ参照が解決できた時に、保持
+                    // 内容の一覧（`crate::storage::Layout`）へ記録する。
+                    // ダイジェスト参照は、それ自体が何らかのタグの指す
+                    // マニフェストを辿った結果として既に記録されている
+                    // はずなので、ここでは記録しない。
+                    if let ManifestReference::Tag(tag) = &manifest_reference {
+                        let _ = state
+                            .layout
+                            .put_tag(&upstream.id, repository, tag, &response.digest)
+                            .await;
+                    }
                     let content_type = response
                         .media_type
                         .unwrap_or_else(|| DEFAULT_MANIFEST_MEDIA_TYPE.to_string());
@@ -161,17 +239,26 @@ async fn handle_v2_request(
                 Err(ManifestFetchError::Blob(err)) => upstream_error_status(&err).into_response(),
             }
         }
-        "blobs" => match state.blob_cache.get(upstream, repository, reference).await {
-            // REQ-0035: クライアントが Range を指定した場合は、その範囲だけ
-            // を返す。
-            Ok(path) => {
-                let range = headers
-                    .get(axum::http::header::RANGE)
-                    .and_then(|value| value.to_str().ok());
-                serve_file(&path, range).await
+        "blobs" => {
+            // REQ-0042: 命中・不命中の判定は取得前の存在確認で行う。
+            // `BlobCache::get` 自身は命中・不命中を返り値で区別しない。
+            let hit = match state.blob_cache.blob_path(reference) {
+                Ok(path) => tokio::fs::try_exists(&path).await.unwrap_or(false),
+                Err(_) => false,
+            };
+            match state.blob_cache.get(upstream, repository, reference).await {
+                Ok(path) => {
+                    state.stats.record_blob(hit);
+                    // REQ-0035: クライアントが Range を指定した場合は、
+                    // その範囲だけを返す。
+                    let range = headers
+                        .get(axum::http::header::RANGE)
+                        .and_then(|value| value.to_str().ok());
+                    serve_file(&path, range).await
+                }
+                Err(err) => upstream_error_status(&err).into_response(),
             }
-            Err(err) => upstream_error_status(&err).into_response(),
-        },
+        }
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }

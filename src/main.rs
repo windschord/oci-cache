@@ -12,14 +12,16 @@
 //!    `tests/conformance.rs` のうち上流の公式 conformance スイートを使う
 //!    `oci_distribution_spec_pull_suite`（REQ-0030）は、この実行ファイルが
 //!    まだ起動できないため Red のまま（下記参照）
-//! 5. UI と観測（REQ-0040 〜 REQ-0047）
+//! 5. UI と観測（REQ-0040 〜 REQ-0047 / REQ-0017 / REQ-0044）— `oci_cache::ui` として実装済み
 //!
 //! クライアント向け HTTP サーバー（REQ-0054 の TLS を含む）は
 //! `oci_cache::server` として実装済みだが、設定ファイルの読み込みが
 //! 無いため、この実行ファイルからはまだ起動できない。`oci_cache::server`
 //! は `oci_cache::cache`（`BlobCache` / `ManifestCache`）を直接使っており、
-//! `oci_cache::storage::Layout`（容量による退避・GC・永続タグ索引）へは
-//! まだ結線していない。
+//! blob・マニフェストの取得・保存自体は `oci_cache::storage::Layout`
+//! （容量による退避・GC）へまだ結線していない。`oci_cache::ui` が保持内容
+//! の一覧（REQ-0040 / 0041）のために使う `Layout` はタグの記録先としてのみ
+//! 結線済みで、同じ保存領域（`root`）を共有する。
 
 fn main() {
     eprintln!("oci-cache: 未実装です。docs/requirements/ を参照してください。");

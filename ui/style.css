@@ -1,6 +1,6 @@
 /*
- * Web UI の最小限の見た目。実装時に置き換わる前提で、
- * 依存を持たないこと（単一実行ファイルへ埋め込むため / REQ-0043）だけを守る。
+ * Web UI の見た目。依存を持たないこと（単一実行ファイルへ埋め込むため
+ * / REQ-0043）だけを守る。
  */
 :root {
   color-scheme: light dark;
@@ -30,4 +30,31 @@ h2 {
 
 section {
   margin-top: 2rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid light-dark(#ddd, #333);
+}
+
+dl[data-role="stats"] {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+dl[data-role="stats"] dt {
+  opacity: 0.7;
+}
+
+dl[data-role="stats"] dd {
+  margin: 0;
 }

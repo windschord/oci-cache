@@ -58,6 +58,11 @@ pub struct ManifestResponse {
     /// Accept との適合判定に使う）。本文が解釈できない、または
     /// `mediaType` を含まない場合は `None`。
     pub media_type: Option<String>,
+    /// 上流へ問い合わせずに保存済みの内容を返せた場合に `true`
+    /// （REQ-0042 のキャッシュ命中率表示が使う）。タグ参照の有効期間切れ
+    /// 再検証・強制再取得・stale 応答はいずれも上流へ実際に問い合わせて
+    /// いるため `false`。
+    pub hit: bool,
 }
 
 /// マニフェストの取得に伴う失敗。[`BlobFetchError`] に加えて、クライアント
@@ -289,6 +294,13 @@ impl ManifestCache {
             // 応答する（`BlobCache::get` がその判定を担う）。内容は不変なので
             // 上流への問い合わせ自体は絞らず、取得後に Accept と照合する。
             ManifestReference::Digest(digest) => {
+                // REQ-0042: 既存ファイルの有無を取得前に見ておくことで、
+                // 上流へ問い合わせずに済んだか（hit）を判定する。
+                // `BlobCache::get` 自身は命中・不命中を返り値で区別しない。
+                let hit = match self.digest_store.blob_path(digest) {
+                    Ok(path) => tokio::fs::try_exists(&path).await.unwrap_or(false),
+                    Err(_) => false,
+                };
                 let path = self.digest_store.get(upstream, repository, digest).await?;
                 let content = tokio::fs::read(&path).await.map_err(BlobFetchError::Io)?;
                 let media_type = parse_media_type(&content);
@@ -300,9 +312,31 @@ impl ManifestCache {
                     digest: digest.clone(),
                     stale: false,
                     media_type,
+                    hit,
                 })
             }
-            ManifestReference::Tag(tag) => self.get_by_tag(upstream, repository, tag, accept).await,
+            ManifestReference::Tag(tag) => {
+                self.get_by_tag(upstream, repository, tag, accept, false)
+                    .await
+            }
+        }
+    }
+
+    /// REQ-0017: 利用者が Web UI から再取得を指示した時、有効期間の残りに
+    /// かかわらず上流レジストリへ問い合わせる。再検証の抑止時間
+    /// （REQ-0045 / REQ-0046）は呼び出し側（`crate::ui`）が別に管理する。
+    pub async fn force_refresh(
+        &self,
+        upstream: &Upstream,
+        repository: &str,
+        tag: &str,
+    ) -> Result<ManifestResponse, BlobFetchError> {
+        match self.get_by_tag(upstream, repository, tag, None, true).await {
+            Ok(response) => Ok(response),
+            Err(ManifestFetchError::Blob(err)) => Err(err),
+            Err(ManifestFetchError::NotAcceptable) => {
+                unreachable!("accept が None の取得は NotAcceptable を返さない")
+            }
         }
     }
 
@@ -312,6 +346,7 @@ impl ManifestCache {
         repository: &str,
         tag: &str,
         accept: Option<&[&str]>,
+        force: bool,
     ) -> Result<ManifestResponse, ManifestFetchError> {
         let key = (upstream.id.clone(), repository.to_string(), tag.to_string());
         let now = tokio::time::Instant::now();
@@ -336,17 +371,21 @@ impl ManifestCache {
 
         // REQ-0011: 有効期間が残っていれば、保存済みの内容をそのまま返す。
         // ただし保存済みの内容が今回の Accept に適合しない場合は、新鮮で
-        // あっても使えないため上流へ取り直す（下へ続く）。
-        if let Some(state) = self.fresh_tag_state(&key, now) {
-            if let Ok(content) = self.read_stored(&state.digest).await {
-                let media_type = parse_media_type(&content);
-                if is_acceptable(media_type.as_deref(), accept) {
-                    return Ok(ManifestResponse {
-                        content,
-                        digest: state.digest,
-                        stale: false,
-                        media_type,
-                    });
+        // あっても使えないため上流へ取り直す（下へ続く）。REQ-0017 の強制
+        // 再取得（`force`）はこの判定自体を行わず、常に上流へ問い合わせる。
+        if !force {
+            if let Some(state) = self.fresh_tag_state(&key, now) {
+                if let Ok(content) = self.read_stored(&state.digest).await {
+                    let media_type = parse_media_type(&content);
+                    if is_acceptable(media_type.as_deref(), accept) {
+                        return Ok(ManifestResponse {
+                            content,
+                            digest: state.digest,
+                            stale: false,
+                            media_type,
+                            hit: true,
+                        });
+                    }
                 }
             }
         }
@@ -370,6 +409,7 @@ impl ManifestCache {
                     content: content.to_vec(),
                     digest,
                     stale: false,
+                    hit: false,
                 })
             }
             // REQ-0013 相当の判断: 保存済みという理由だけで配信を続けると、
@@ -401,6 +441,7 @@ impl ManifestCache {
                                 digest: state.digest,
                                 stale: true,
                                 media_type,
+                                hit: false,
                             });
                         }
                     }

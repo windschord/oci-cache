@@ -8,10 +8,14 @@
 //! を取得・保存する。
 //!
 //! OCI Image Layout による永続化（REQ-0020 〜 REQ-0029）は `crate::storage`
-//! として実装済みだが、この `cache` モジュール（`ManifestCache` のタグ
-//! 状態、`BlobCache` の保存）はまだそれを経由せず、再起動で失われる
-//! 前提のまま・容量による退避も行わない。`crate::server::AppState` を
-//! `crate::storage::Layout` で置き換える結線は別途行う。
+//! として実装済み。この `cache` モジュール（`ManifestCache` のタグ状態、
+//! `BlobCache` の保存）自体はまだそれを経由せず、タグの再検証状態は
+//! 再起動で失われる前提のまま・容量による退避も行わない。
+//! `crate::server::AppState` は `crate::storage::Layout` を別途持ち、
+//! 保持内容の一覧（REQ-0040 / 0041、`crate::ui`）のためにタグの記録先
+//! としてだけ結線している（blob の実体は `BlobCache` と `Layout` が同じ
+//! 保存先を共有しているため、容量による退避は結線すれば機能する状態に
+//! あるが、実際の配信経路（`get`/`store`）をそこへ通す結線は別途行う）。
 
 mod blob;
 mod manifest;

@@ -257,18 +257,10 @@ impl Layout {
         Ok(removed)
     }
 
-    /// 現在どの上流のどのタグからも（直接・間接に）辿れるダイジェストの集合。
-    ///
-    /// タグが直接指すダイジェストだけでなく、そこから `referenced_digests`
-    /// で新たに見つかったダイジェストも作業キューで再帰的に辿る。マニフェ
-    /// ストリスト（Image Index）がタグから指される場合、その子マニフェスト
-    /// 自体は1階層目で live に入るが、子マニフェストが参照する config・
-    /// layers は2階層目であり、1階層分しか辿らないと誤って回収してしまう
-    /// （CodeRabbit レビュー指摘）。
-    async fn compute_live_set(&self) -> Result<HashSet<String>, BlobFetchError> {
-        let mut live = HashSet::new();
-        let mut queue = Vec::new();
-
+    /// `upstreams/` 配下に実在する上流 ID の一覧（ディレクトリ名）。
+    /// `compute_live_set` と `catalog` の双方が、記録済みのタグを
+    /// 上流ごとに読むために使う。
+    async fn list_upstream_ids(&self) -> Result<Vec<String>, BlobFetchError> {
         let upstreams_dir = self.root.join("upstreams");
         let mut upstream_ids = Vec::new();
         match tokio::fs::read_dir(&upstreams_dir).await {
@@ -287,8 +279,44 @@ impl Layout {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(BlobFetchError::Io(err)),
         }
+        Ok(upstream_ids)
+    }
 
-        for upstream_id in upstream_ids {
+    /// 保存済みのリポジトリ参照とタグの一覧（REQ-0040）。各項目は取得元の
+    /// 上流（REQ-0041）を伴う。
+    pub async fn catalog(&self) -> Result<Vec<CatalogEntry>, BlobFetchError> {
+        let mut entries = Vec::new();
+        for upstream_id in self.list_upstream_ids().await? {
+            let tags = self
+                .tag_index(&upstream_id)?
+                .list()
+                .await
+                .map_err(BlobFetchError::Io)?;
+            for (repository, tag, digest) in tags {
+                entries.push(CatalogEntry {
+                    upstream_id: upstream_id.clone(),
+                    repository,
+                    tag,
+                    digest,
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    /// 現在どの上流のどのタグからも（直接・間接に）辿れるダイジェストの集合。
+    ///
+    /// タグが直接指すダイジェストだけでなく、そこから `referenced_digests`
+    /// で新たに見つかったダイジェストも作業キューで再帰的に辿る。マニフェ
+    /// ストリスト（Image Index）がタグから指される場合、その子マニフェスト
+    /// 自体は1階層目で live に入るが、子マニフェストが参照する config・
+    /// layers は2階層目であり、1階層分しか辿らないと誤って回収してしまう
+    /// （CodeRabbit レビュー指摘）。
+    async fn compute_live_set(&self) -> Result<HashSet<String>, BlobFetchError> {
+        let mut live = HashSet::new();
+        let mut queue = Vec::new();
+
+        for upstream_id in self.list_upstream_ids().await? {
             let digests = self
                 .tag_index(&upstream_id)?
                 .all_digests()
@@ -346,10 +374,38 @@ impl Layout {
     }
 }
 
+/// 保存済みのリポジトリ参照・タグ1件（REQ-0040 / REQ-0041）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogEntry {
+    pub upstream_id: String,
+    pub repository: String,
+    pub tag: String,
+    pub digest: String,
+}
+
 /// 保存先ファイルシステムの全容量（バイト）。
 pub fn filesystem_capacity(path: &Path) -> std::io::Result<u64> {
     let stat = rustix::fs::statvfs(path).map_err(std::io::Error::from)?;
     Ok(stat.f_blocks * stat.f_frsize)
+}
+
+/// 共有 blob ストア（`<root>/blobs/sha256/`）が実際に使っている容量
+/// （バイト）。REQ-0042 の保存領域の使用量表示に使う。`AccessIndex`
+/// の合計（`touch` された blob だけを数える）とは異なり、ディスク上の
+/// 実体をそのまま数える。`crate::cache` 経由の取得（`Layout` を経由
+/// しない）で保存された blob も正しく数えるため。
+pub async fn blobs_disk_usage(root: &Path) -> std::io::Result<u64> {
+    let blobs_dir = root.join("blobs").join("sha256");
+    let mut entries = match tokio::fs::read_dir(&blobs_dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let mut total = 0u64;
+    while let Some(entry) = entries.next_entry().await? {
+        total += entry.metadata().await?.len();
+    }
+    Ok(total)
 }
 
 /// REQ-0026: 既定の上限はファイルシステム全容量の50%。

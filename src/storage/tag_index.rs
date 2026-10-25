@@ -132,6 +132,27 @@ impl TagIndex {
             .collect())
     }
 
+    /// 記録済みの `(repository, tag, digest)` の一覧（REQ-0040 の保持内容
+    /// 一覧表示が使う）。`org.opencontainers.image.ref.name`
+    /// アノテーション（`"{repository}:{tag}"`）を分解して復元する。
+    /// リポジトリ名・タグ名のいずれも `:` を含まない文法のため、最後の
+    /// `:` で区切れば一意に戻せる。アノテーションが無い、または形式が
+    /// 想定と異なる記述子（REQ-0022 の慣例に従わない外部ツールによる
+    /// 追記等）は一覧から静かに除く。
+    pub async fn list(&self) -> std::io::Result<Vec<(String, String, String)>> {
+        Ok(self
+            .read()
+            .await?
+            .manifests
+            .into_iter()
+            .filter_map(|m| {
+                let ref_name = m.annotations.get(REF_NAME_ANNOTATION)?;
+                let (repository, tag) = ref_name.rsplit_once(':')?;
+                Some((repository.to_string(), tag.to_string(), m.digest))
+            })
+            .collect())
+    }
+
     async fn read(&self) -> std::io::Result<IndexFile> {
         match tokio::fs::read(&self.path).await {
             // 解析に失敗した内容を空の索引として扱うと、以降の put/remove が
