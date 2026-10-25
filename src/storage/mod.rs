@@ -330,48 +330,80 @@ impl Layout {
         }
 
         while let Some(digest) = queue.pop() {
-            for referenced in self.referenced_digests(&digest).await {
-                if live.insert(referenced.clone()) {
-                    queue.push(referenced);
+            let referenced = self.referenced_digests(&digest).await;
+            // config・layers はマニフェストが指す葉であり、OCI の仕様上
+            // それ自体がさらに他の blob を参照することは無いため、live へ
+            // 加えるだけでキューには積まない。積んでしまうと、次の周回で
+            // `referenced_digests` がその digest を本文として読み込もうと
+            // する。layer は JSON ではない任意サイズの実体（最大で
+            // 数ギガバイト）であり、`tokio::fs::read` で丸ごと主記憶に
+            // 載せた後に解釈へ失敗するだけに終わる（CodeRabbit レビュー
+            // 指摘: REQ-0051 の趣旨に反する処理遅延・メモリ消費）。
+            for leaf in referenced.leaves {
+                live.insert(leaf);
+            }
+            // manifests（Image Index の子マニフェスト）はさらに config・
+            // layers を参照しうるマニフェストそのものなので、引き続き
+            // 辿る必要がある。
+            for child in referenced.children {
+                if live.insert(child.clone()) {
+                    queue.push(child);
                 }
             }
         }
         Ok(live)
     }
 
-    /// マニフェストの内容（config・layers・manifests）が参照するダイジェスト。
-    /// 読めない・解釈できない場合は空（そのマニフェスト自身は呼び出し元が
-    /// 既に live 集合へ加えている）。
-    async fn referenced_digests(&self, manifest_digest: &str) -> Vec<String> {
+    /// マニフェストの内容が参照するダイジェストを、キューに積んでよいか
+    /// どうかで分けて返す。読めない・解釈できない場合は両方とも空
+    /// （そのマニフェスト自身は呼び出し元が既に live 集合へ加えている）。
+    async fn referenced_digests(&self, manifest_digest: &str) -> ReferencedDigests {
         let Ok(path) = self.blobs.blob_path(manifest_digest) else {
-            return Vec::new();
+            return ReferencedDigests::default();
         };
         let Ok(bytes) = tokio::fs::read(&path).await else {
-            return Vec::new();
+            return ReferencedDigests::default();
         };
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return Vec::new();
+            return ReferencedDigests::default();
         };
 
-        let mut digests = Vec::new();
+        let mut leaves = Vec::new();
         if let Some(digest) = value
             .get("config")
             .and_then(|c| c.get("digest"))
             .and_then(|d| d.as_str())
         {
-            digests.push(digest.to_string());
+            leaves.push(digest.to_string());
         }
-        for key in ["layers", "manifests"] {
-            if let Some(entries) = value.get(key).and_then(|v| v.as_array()) {
-                for entry in entries {
-                    if let Some(digest) = entry.get("digest").and_then(|d| d.as_str()) {
-                        digests.push(digest.to_string());
-                    }
+        if let Some(entries) = value.get("layers").and_then(|v| v.as_array()) {
+            for entry in entries {
+                if let Some(digest) = entry.get("digest").and_then(|d| d.as_str()) {
+                    leaves.push(digest.to_string());
                 }
             }
         }
-        digests
+
+        let mut children = Vec::new();
+        if let Some(entries) = value.get("manifests").and_then(|v| v.as_array()) {
+            for entry in entries {
+                if let Some(digest) = entry.get("digest").and_then(|d| d.as_str()) {
+                    children.push(digest.to_string());
+                }
+            }
+        }
+
+        ReferencedDigests { leaves, children }
     }
+}
+
+/// [`Layout::referenced_digests`] の戻り値。`leaves`（config・layers）は
+/// live 集合に加えるだけでよく、`children`（Image Index の子マニフェスト）
+/// はさらに辿る必要がある（作業キューに積む）という区別を型で表す。
+#[derive(Default)]
+struct ReferencedDigests {
+    leaves: Vec<String>,
+    children: Vec<String>,
 }
 
 /// 保存済みのリポジトリ参照・タグ1件（REQ-0040 / REQ-0041）。

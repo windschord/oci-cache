@@ -453,6 +453,39 @@ async fn force_refresh_cooldown_default_is_60_seconds() {
     );
 }
 
+/// `RefreshGate` が抑止時間を過ぎた記録を溜め続けないことを確認する
+/// （CodeRabbit レビュー指摘: `post_refresh` は認証を要求せず任意の
+/// `repository` / `tag` を受け付けるため、掃除しなければ再起動まで
+/// メモリ使用量が増え続ける）。
+#[tokio::test(start_paused = true)]
+async fn refresh_gate_purges_expired_entries() {
+    let gate = oci_cache::ui::RefreshGate::new(Duration::from_secs(1));
+    for i in 0..50 {
+        let key = (
+            "docker.io".to_string(),
+            format!("library/repo-{i}"),
+            "latest".to_string(),
+        );
+        assert!(gate.try_acquire(&key).is_ok());
+    }
+    assert_eq!(gate.active_entries(), 50);
+
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    // 新しい1件を受け付けるだけで、期限切れの記録がすべて掃除される。
+    let fresh_key = (
+        "docker.io".to_string(),
+        "library/fresh".to_string(),
+        "latest".to_string(),
+    );
+    assert!(gate.try_acquire(&fresh_key).is_ok());
+    assert_eq!(
+        gate.active_entries(),
+        1,
+        "抑止時間を過ぎた記録が掃除されずに溜まっている"
+    );
+}
+
 /// REQ-0047: 強制再取得の抑止時間が経過していない時、システムは Web UI
 /// 上で強制再取得の操作を実行できない状態として表示しなければならない。
 ///

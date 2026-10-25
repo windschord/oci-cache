@@ -5,7 +5,7 @@
 
 use oci_cache::cache::{ManifestCache, ManifestReference, OciBlobSource};
 use oci_cache::routing::Upstream;
-use oci_cache::storage::{filesystem_capacity, Layout};
+use oci_cache::storage::{filesystem_capacity, Layout, TagIndex};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use wiremock::matchers::{method, path};
@@ -519,4 +519,35 @@ async fn manifest_digest_mismatch_rejects_and_does_not_store() {
     assert!(result.is_err());
     let hex = wrong_digest.strip_prefix("sha256:").unwrap();
     assert!(!store_dir.path().join("blobs/sha256").join(hex).exists());
+}
+
+/// タグが指すダイジェストが変わっていない時、`TagIndex::put` は
+/// `index.json` への書き込みを行わない（CodeRabbit レビュー指摘:
+/// `crate::server` はタグ参照が解決できるたびに（キャッシュ命中かどうかに
+/// かかわらず）`put` を呼ぶため、これが無いと命中時にも毎回 index.json
+/// の読み書きが発生する）。書き込みが実際に起きたかどうかを、ファイルの
+/// 変更時刻が変わらないことで確認する。
+#[tokio::test]
+async fn tag_index_put_skips_write_when_digest_unchanged() {
+    let dir = tempdir().unwrap();
+    let index = TagIndex::new(dir.path().to_path_buf());
+    let digest = digest_of(b"unchanged content");
+
+    index.put("library/nginx", "latest", &digest).await.unwrap();
+    let index_path = dir.path().join("index.json");
+    let mtime_after_first_put = std::fs::metadata(&index_path).unwrap().modified().unwrap();
+
+    // ファイルの変更時刻の分解能より確実に大きい間隔を空ける。
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let result = index.put("library/nginx", "latest", &digest).await.unwrap();
+    assert_eq!(
+        result, None,
+        "ダイジェストが変わっていないので置き換えは発生していないはず"
+    );
+    let mtime_after_second_put = std::fs::metadata(&index_path).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_after_first_put, mtime_after_second_put,
+        "ダイジェストが変わらない put で index.json が書き直されている"
+    );
 }

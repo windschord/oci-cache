@@ -91,6 +91,13 @@ impl TagIndex {
             .iter()
             .position(|m| m.annotations.get(REF_NAME_ANNOTATION) == Some(&ref_name));
         let previous_digest = position.map(|i| index.manifests[i].digest.clone());
+        // CodeRabbit レビュー指摘: ダイジェストが変わっていなければ書き込む
+        // 内容も無い。`crate::server` はタグ参照が解決できるたびに
+        // （キャッシュ命中かどうかにかかわらず）`put` を呼ぶため、これが
+        // 無いと命中時にも毎回 index.json の読み書きが発生する。
+        if previous_digest.as_deref() == Some(digest) {
+            return Ok(None);
+        }
 
         let descriptor = ManifestDescriptor {
             media_type: MANIFEST_MEDIA_TYPE.to_string(),

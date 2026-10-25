@@ -111,6 +111,12 @@ impl RefreshGate {
     pub fn try_acquire(&self, key: &(String, String, String)) -> Result<(), Duration> {
         let now = Instant::now();
         let mut guard = self.last_refresh.lock().unwrap();
+        // CodeRabbit レビュー指摘: 抑止時間を過ぎた記録を消さずに溜め続ける
+        // と、認証の要らない `POST /api/refresh` へ任意の repository・tag
+        // を送り続けるだけでマップが再起動まで無制限に増える。ここで
+        // ついでに掃除すれば、大きさは抑止時間内に実際に来た要求数で
+        // 頭打ちになる。
+        guard.retain(|_, last| now.saturating_duration_since(*last) < self.cooldown);
         if let Some(last) = guard.get(key) {
             let elapsed = now.saturating_duration_since(*last);
             if elapsed < self.cooldown {
@@ -133,6 +139,14 @@ impl RefreshGate {
             }
             None => Duration::ZERO,
         }
+    }
+
+    /// 現在記録されている `(upstream, repository, tag)` の件数。抑止時間を
+    /// 過ぎた記録を溜め込んでいないことを確認するテストのためだけに公開
+    /// する。
+    #[doc(hidden)]
+    pub fn active_entries(&self) -> usize {
+        self.last_refresh.lock().unwrap().len()
     }
 }
 

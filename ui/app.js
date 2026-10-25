@@ -5,6 +5,16 @@
 
 const POLL_INTERVAL_MS = 5000;
 
+// 直前の強制再取得が失敗したエントリのキー集合。`refreshCatalog` は
+// ポーリングのたびに行を丸ごと再構築するため、ボタンの文字列だけに
+// 失敗を記録すると次の定期更新で即座に消えてしまう（CodeRabbit
+// レビュー指摘）。再構築後も `renderRow` がここを見て表示を復元する。
+const failedRefreshes = new Set();
+
+function entryKey(entry) {
+  return `${entry.upstream}\u0000${entry.repository}\u0000${entry.tag}`;
+}
+
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KiB", "MiB", "GiB", "TiB"];
@@ -35,6 +45,8 @@ async function refreshStats() {
 }
 
 async function requestRefresh(entry, button) {
+  const key = entryKey(entry);
+  failedRefreshes.delete(key);
   button.disabled = true;
   button.textContent = "再取得中...";
   try {
@@ -48,12 +60,20 @@ async function requestRefresh(entry, button) {
       }),
     });
     if (!response.ok && response.status !== 429) {
+      failedRefreshes.add(key);
       button.textContent = "失敗しました";
     }
   } catch {
+    failedRefreshes.add(key);
     button.textContent = "失敗しました";
   } finally {
-    await refreshCatalog();
+    // カタログの再取得自体が失敗しても、上で記録した失敗表示は
+    // `failedRefreshes` 経由で次回の再構築まで残る。
+    try {
+      await refreshCatalog();
+    } catch {
+      // 無視: 次のポーリングで再試行される。
+    }
   }
 }
 
@@ -76,7 +96,7 @@ function renderRow(entry) {
     button.textContent = `再取得（あと${remaining}秒）`;
   } else {
     button.disabled = false;
-    button.textContent = "再取得";
+    button.textContent = failedRefreshes.has(entryKey(entry)) ? "失敗しました" : "再取得";
     button.addEventListener("click", () => requestRefresh(entry, button));
   }
   actionCell.appendChild(button);
