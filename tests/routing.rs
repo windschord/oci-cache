@@ -1,6 +1,7 @@
 //! ルーティング解決のテスト。
 //!
-//! 対象要求: REQ-0001 / REQ-0002 / REQ-0003 / REQ-0007 / REQ-0009 / REQ-0056〜REQ-0059。
+//! 対象要求: REQ-0001 / REQ-0002 / REQ-0003 / REQ-0006 〜 REQ-0009 /
+//! REQ-0056〜REQ-0059。
 //! テスト名は `docs/requirements/routing.yaml` の `verification.ref` と一致させてある。
 //!
 //! 上流レジストリは wiremock でモックし、`GET /v2/<repository>/tags/list` への
@@ -9,10 +10,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
 use oci_cache::routing::{
     HttpUpstreamProbe, InMemoryRoutingMemo, ProbeOutcome, ResolutionSource, Router, RoutingConfig,
     RoutingError, RoutingMemoStore, Upstream, UpstreamProbe,
 };
+use sha2::{Digest, Sha256};
+use tower::ServiceExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -66,6 +71,7 @@ async fn ns_hint_selects_single_upstream() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -76,6 +82,62 @@ async fn ns_hint_selects_single_upstream() {
     assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
     assert!(docker_server.received_requests().await.unwrap().is_empty());
     assert!(quay_server.received_requests().await.unwrap().is_empty());
+}
+
+/// REQ-0006: クライアントが指定するイメージ参照に、上流レジストリを識別
+/// するための追加のパス要素を要求しない。`/v2/<repository>/manifests/...`
+/// だけで要求が届き、上流の決定にはクエリパラメータ（`?ns=`、REQ-0001）
+/// だけを使う。
+#[tokio::test]
+async fn pull_path_has_no_upstream_prefix() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let repo = "library/nginx";
+    let content = b"manifest content for path transparency test".to_vec();
+    register_found(&docker_server, repo).await;
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&docker_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/manifests/latest")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(content.clone()))
+        .mount(&docker_server)
+        .await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let store_dir = tempfile::tempdir().unwrap();
+    let state = oci_cache::server::AppState::new(config, store_dir.path());
+    let app = oci_cache::server::build_router(state);
+
+    // 上流を識別するパス要素（例: `/docker.io/library/nginx/...`）を
+    // 一切含まない
+    let request = HttpRequest::builder()
+        .uri(format!("/v2/{repo}/manifests/latest?ns=docker.io"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    // REQ-0032: マニフェスト応答には Docker-Content-Digest ヘッダを含め、
+    // 応答本文から計算したダイジェストと一致させる
+    let expected_digest = format!("sha256:{}", hex::encode(Sha256::digest(&content)));
+    assert_eq!(
+        response
+            .headers()
+            .get("Docker-Content-Digest")
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_digest.as_str())
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), content.as_slice());
 }
 
 /// REQ-0002: 名前空間ヒントもルーティングメモも無い時、設定順序で問い合わせ、
@@ -94,6 +156,7 @@ async fn ordered_fallback_returns_first_success() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -117,6 +180,7 @@ async fn routing_memo_skips_probe_on_second_request() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -146,6 +210,7 @@ async fn name_collision_resolved_by_configured_order() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -171,6 +236,7 @@ async fn configured_upstream_order_is_used() {
     let config = RoutingConfig {
         upstreams: vec![quay, ghcr, docker],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -195,6 +261,7 @@ async fn routing_memo_discarded_when_recorded_upstream_misses() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -229,6 +296,7 @@ async fn unresponsive_upstream_advances_to_next() {
         upstreams: vec![docker, ghcr, quay],
         // テストを高速に保つため既定値 (5秒) より短い待ち時間を使う
         probe_timeout: Duration::from_millis(50),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -255,6 +323,7 @@ async fn routing_memo_discarded_when_upstream_order_changes() {
     let config_a = RoutingConfig {
         upstreams: vec![docker.clone(), ghcr.clone(), quay.clone()],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router_a = Router::new(config_a, probe(), memo.clone());
     let first = router_a.resolve(repo, None).await.unwrap();
@@ -264,6 +333,7 @@ async fn routing_memo_discarded_when_upstream_order_changes() {
     let config_b = RoutingConfig {
         upstreams: vec![ghcr, docker, quay],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router_b = Router::new(config_b, probe(), memo);
     let second = router_b.resolve(repo, None).await.unwrap();
@@ -273,6 +343,115 @@ async fn routing_memo_discarded_when_upstream_order_changes() {
     // 問い合わせが発生しないはず
     assert!(!ghcr_server.received_requests().await.unwrap().is_empty());
     let _ = quay_server;
+}
+
+/// REQ-0004: 全上流が不存在を返した結果を記録し、有効期間内は再探索しない。
+#[tokio::test]
+async fn negative_cache_suppresses_reprobe() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, ghcr_server) = spawn_upstream("ghcr.io").await;
+    let repo = "library/nginx";
+    register_not_found(&docker_server, repo).await;
+    register_not_found(&ghcr_server, repo).await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker, ghcr],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
+
+    let first = router.resolve(repo, None).await.unwrap_err();
+    assert!(matches!(first, RoutingError::NotFoundOnAnyUpstream));
+    assert_eq!(docker_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
+
+    let second = router.resolve(repo, None).await.unwrap_err();
+
+    assert!(matches!(second, RoutingError::NotFoundOnAnyUpstream));
+    // ネガティブキャッシュが効いていれば、2回目の要求で上流へは問い合わせない
+    assert_eq!(docker_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
+}
+
+/// REQ-0004 と REQ-0058 の相互作用: 上流の設定順序が変更された時、
+/// ネガティブキャッシュの記録も破棄され、新しい上流に存在するリポジトリを
+/// 有効期限が切れるまで誤って不存在のまま返し続けない
+/// （CodeRabbit レビュー指摘: `put_negative` が世代を見ておらず、
+/// `activate_order` も `negative_entries` を消していなかった）。
+#[tokio::test]
+async fn negative_cache_discarded_when_upstream_order_changes() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, ghcr_server) = spawn_upstream("ghcr.io").await;
+    let repo = "library/nginx";
+    register_not_found(&docker_server, repo).await;
+    register_not_found(&ghcr_server, repo).await;
+
+    // 設定の再読み込みを、同じメモを共有した2つの Router で表現する
+    let memo = Arc::new(InMemoryRoutingMemo::default());
+
+    let config_a = RoutingConfig {
+        upstreams: vec![docker.clone(), ghcr.clone()],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let router_a = Router::new(config_a, probe(), memo.clone());
+    let first = router_a.resolve(repo, None).await.unwrap_err();
+    assert!(matches!(first, RoutingError::NotFoundOnAnyUpstream));
+
+    // 新しい上流（quay.io）を追加した設定へ切り替える
+    let (quay, quay_server) = spawn_upstream("quay.io").await;
+    register_found(&quay_server, repo).await;
+
+    let config_b = RoutingConfig {
+        upstreams: vec![docker, ghcr, quay],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let router_b = Router::new(config_b, probe(), memo);
+
+    let second = router_b.resolve(repo, None).await.unwrap();
+
+    // ネガティブキャッシュの記録が残っていれば NotFoundOnAnyUpstream に
+    // なるはずだが、設定変更で破棄されていれば quay.io まで探索が届く
+    assert_eq!(second.upstream, "quay.io");
+}
+
+/// REQ-0005: ネガティブキャッシュの既定の有効期間は30分。
+#[test]
+fn negative_cache_default_ttl_is_30_minutes() {
+    assert_eq!(
+        RoutingConfig::default().negative_cache_ttl,
+        Duration::from_secs(30 * 60)
+    );
+}
+
+/// REQ-0008: 設定された3つの上流レジストリすべてに問い合わせできる。
+#[tokio::test]
+async fn all_configured_upstreams_reachable() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let (ghcr, ghcr_server) = spawn_upstream("ghcr.io").await;
+    let (quay, quay_server) = spawn_upstream("quay.io").await;
+    let repo = "library/nginx";
+    register_not_found(&docker_server, repo).await;
+    register_not_found(&ghcr_server, repo).await;
+    register_found(&quay_server, repo).await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker, ghcr, quay],
+        probe_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
+
+    let resolution = router.resolve(repo, None).await.unwrap();
+
+    // 末尾の quay.io まで到達できたということは、先頭2つ（docker.io /
+    // ghcr.io）にも実際に問い合わせが行われたことを意味する
+    assert_eq!(resolution.upstream, "quay.io");
+    assert_eq!(docker_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(ghcr_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(quay_server.received_requests().await.unwrap().len(), 1);
 }
 
 /// REQ-0059: 上流レジストリへの問い合わせの既定の待ち時間は5秒。
@@ -297,6 +476,7 @@ async fn fallback_reports_unreachable_when_some_upstream_times_out() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr],
         probe_timeout: Duration::from_millis(50),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -317,6 +497,7 @@ async fn fallback_reports_not_found_when_all_upstreams_miss() {
     let config = RoutingConfig {
         upstreams: vec![docker, ghcr],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
 
@@ -341,6 +522,7 @@ async fn routing_memo_rejects_write_from_stale_generation() {
     let config_a = RoutingConfig {
         upstreams: vec![docker.clone(), ghcr.clone()],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let router_a = Router::new(config_a, probe(), memo.clone());
 
@@ -355,6 +537,7 @@ async fn routing_memo_rejects_write_from_stale_generation() {
     let config_b = RoutingConfig {
         upstreams: vec![ghcr, docker],
         probe_timeout: Duration::from_secs(5),
+        ..Default::default()
     };
     let _router_b = Router::new(config_b, probe(), memo.clone());
 

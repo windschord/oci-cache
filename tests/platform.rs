@@ -1,15 +1,17 @@
 //! 実行基盤に関わる要求のテスト。
 //!
-//! このフェーズで対象とする要求: REQ-0051（`CLAUDE.md` の実装順序 2.）。
+//! 対象要求: REQ-0051（`CLAUDE.md` の実装順序 2.）/ REQ-0054（TLS の受け付け）。
 //! `tests/platform.rs::large_blob_relay_does_not_buffer_whole_body` は
 //! `docs/requirements/generated/traceability.md` の REQ-0051 の検証手段。
 
+use std::net::TcpListener;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use oci_cache::cache::{BlobSource, OciBlobSource};
-use oci_cache::routing::Upstream;
+use oci_cache::routing::{RoutingConfig, Upstream};
+use oci_cache::server::{build_router, serve_tls_on, AppState};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWrite;
 use wiremock::matchers::{method, path};
@@ -112,4 +114,65 @@ async fn large_blob_relay_does_not_buffer_whole_body() {
         max_write < content.len() / 4,
         "1回の書き込みサイズが本文全体に対して大きすぎる(応答全体を主記憶に保持している疑いがある): {max_write}"
     );
+}
+
+/// REQ-0054: 運用者が証明書と秘密鍵を設定した時、システムは TLS による
+/// 接続を受け付けなければならない。
+#[tokio::test]
+async fn tls_listener_accepts_configured_certificate() {
+    // 接続に使う 127.0.0.1 を SAN に含める（IP 経由で接続するため、
+    // ホスト名 "localhost" だけでは証明書検証がホスト名不一致で失敗する）
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+            .unwrap();
+    let cert_pem = cert.pem();
+    let cert_dir = tempfile::tempdir().unwrap();
+    let cert_path = cert_dir.path().join("cert.pem");
+    let key_path = cert_dir.path().join("key.pem");
+    std::fs::write(&cert_path, &cert_pem).unwrap();
+    std::fs::write(&key_path, signing_key.serialize_pem()).unwrap();
+
+    // OS に空きポートを選ばせ、実際に割り当てられたアドレスへ接続する
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(RoutingConfig::default(), store_dir.path());
+    let app = build_router(state);
+    let server = tokio::spawn(serve_tls_on(listener, cert_path, key_path, app));
+
+    // `serve_tls_on` へ渡したのと同じ証明書だけを信頼するクライアントを
+    // 使う（CodeRabbit レビュー指摘: `danger_accept_invalid_certs` では
+    // 任意の証明書を受け入れてしまい、`cert_path` / `key_path` が実際に
+    // 使われたことを検証できていなかった）。これにより、提示された証明書が
+    // 設定したものと異なれば検証が失敗するようになる
+    let root_cert = reqwest::Certificate::from_pem(cert_pem.as_bytes()).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(root_cert)
+        .build()
+        .unwrap();
+    let url = format!("https://127.0.0.1:{}/v2/", addr.port());
+    let mut last_err = None;
+    let mut response = None;
+    for _ in 0..20 {
+        if server.is_finished() {
+            let result = server.await;
+            panic!("TLS サーバーのタスクが早期に終了した: {result:?}");
+        }
+        match client.get(&url).send().await {
+            Ok(r) => {
+                response = Some(r);
+                break;
+            }
+            Err(err) => {
+                last_err = Some(err);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    let response = response.unwrap_or_else(|| panic!("接続に失敗し続けた: {last_err:?}"));
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    server.abort();
 }

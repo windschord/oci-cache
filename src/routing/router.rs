@@ -94,7 +94,26 @@ where
         }
 
         // ③ REQ-0002 / REQ-0007 / REQ-0009
-        self.resolve_via_fallback(repository).await
+        // REQ-0004: 直近の順序フォールバックで全上流が不存在だった記録が
+        // 有効期限内であれば、再探索せずに不存在を返す
+        if self
+            .memo
+            .is_negative_cached(repository, tokio::time::Instant::now())
+        {
+            return Err(RoutingError::NotFoundOnAnyUpstream);
+        }
+
+        match self.resolve_via_fallback(repository).await {
+            Err(RoutingError::NotFoundOnAnyUpstream) => {
+                self.memo.put_negative(
+                    repository,
+                    tokio::time::Instant::now() + self.config.negative_cache_ttl,
+                    self.generation,
+                );
+                Err(RoutingError::NotFoundOnAnyUpstream)
+            }
+            other => other,
+        }
     }
 
     async fn resolve_via_ns_hint(

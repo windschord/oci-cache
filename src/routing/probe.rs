@@ -54,8 +54,10 @@ impl HttpUpstreamProbe {
         url: &str,
         challenge: &BearerChallenge,
     ) -> ProbeOutcome {
+        // 存在確認は認証情報を使わない（配信・保存の可否判定は
+        // `cache::blob::OciBlobSource::resolve_auth` が別に行う）。
         let Some(token) =
-            registry_auth::fetch_bearer_token(&self.token_client, upstream, challenge).await
+            registry_auth::fetch_bearer_token(&self.token_client, upstream, challenge, None).await
         else {
             return ProbeOutcome::Unreachable;
         };
