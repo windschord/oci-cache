@@ -93,7 +93,12 @@ function renderRow(entry) {
   // REQ-0047: 抑止時間が経過していない間は操作を実行できない状態にする。
   if (remaining > 0) {
     button.disabled = true;
-    button.textContent = `再取得（あと${remaining}秒）`;
+    // post_refresh は上流取得の前に抑止時刻を記録するため、502 などで
+    // 失敗しても抑止時間は残る。ここでも failedRefreshes を見ないと、
+    // 抑止時間中は「再取得（あとN秒）」だけが表示され失敗が伝わらない
+    // （CodeRabbit レビュー指摘）。
+    const label = failedRefreshes.has(entryKey(entry)) ? "失敗しました" : "再取得";
+    button.textContent = `${label}（あと${remaining}秒）`;
   } else {
     button.disabled = false;
     button.textContent = failedRefreshes.has(entryKey(entry)) ? "失敗しました" : "再取得";
