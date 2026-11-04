@@ -1,29 +1,94 @@
 //! oci-cache — 複数の上流レジストリに対応する、パス透過なプルスルーキャッシュ。
 //!
-//! 実行ファイルとしての起動はまだ実装していない。要求は `docs/requirements/` を、
-//! 対応関係は `docs/requirements/generated/traceability.md` を参照すること。
+//! 起動は `--config <path>` で指定した TOML 設定ファイルを読む
+//! （雛形は `config.example.toml`、読み込みは `oci_cache::config::Config::load`）。
 //!
-//! 実装の順序は次を想定する。
+//! 実装の進め方は `CLAUDE.md` と `docs/requirements/generated/traceability.md` を
+//! 参照すること。クライアント向け HTTP サーバー（`oci_cache::server`）・
+//! ルーティング（`oci_cache::routing`）・取得と保存（`oci_cache::cache`）・
+//! Web UI と観測（`oci_cache::ui`）はいずれも実装済みで、ここではそれらを
+//! 設定ファイルから組み立てて実際に起動するだけを担う。
 //!
-//! 1. ルーティング解決（REQ-0001 〜 0003 / 0006 〜 0009 / 0056 〜 0059）— `oci_cache::routing` として実装済み
-//! 2. 上流からの取得と中継（REQ-0010 〜 0016 / 0018 / 0019 / 0051）— `oci_cache::cache` として実装済み
-//! 3. OCI Image Layout による保存（REQ-0020 〜 0029）— `oci_cache::storage` として実装済み
-//! 4. 仕様準拠（REQ-0030 〜 REQ-0036）— `oci_cache::server` / `oci_cache::cache` に実装済み。
-//!    `tests/conformance.rs` のうち上流の公式 conformance スイートを使う
-//!    `oci_distribution_spec_pull_suite`（REQ-0030）は、この実行ファイルが
-//!    まだ起動できないため Red のまま（下記参照）
-//! 5. UI と観測（REQ-0040 〜 REQ-0047 / REQ-0017 / REQ-0044）— `oci_cache::ui` として実装済み
-//!
-//! クライアント向け HTTP サーバー（REQ-0054 の TLS を含む）は
-//! `oci_cache::server` として実装済みだが、設定ファイルの読み込みが
-//! 無いため、この実行ファイルからはまだ起動できない。`oci_cache::server`
-//! は `oci_cache::cache`（`BlobCache` / `ManifestCache`）を直接使っており、
-//! blob・マニフェストの取得・保存自体は `oci_cache::storage::Layout`
-//! （容量による退避・GC）へまだ結線していない。`oci_cache::ui` が保持内容
-//! の一覧（REQ-0040 / 0041）のために使う `Layout` はタグの記録先としてのみ
-//! 結線済みで、同じ保存領域（`root`）を共有する。
+//! `oci_cache::server` は `oci_cache::cache`（`BlobCache` / `ManifestCache`）を
+//! 直接使っており、blob・マニフェストの取得・保存自体は容量による退避・GC
+//! を持つ `oci_cache::storage::Layout` へまだ結線していない（`[storage]
+//! capacity` が今は効かない理由。`oci_cache::server::AppState` のモジュール
+//! doc を参照）。この結線は別途行う。
 
-fn main() {
-    eprintln!("oci-cache: 未実装です。docs/requirements/ を参照してください。");
-    std::process::exit(1);
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use oci_cache::config::Config;
+use oci_cache::server::{build_router, serve_tls_on, AppState};
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let config_path = match parse_args(std::env::args().skip(1)) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let config = match Config::load(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("oci-cache: 設定の読み込みに失敗しました: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match run(config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("oci-cache: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--config <path>` だけを受け付ける。待ち受け先やログの詳細といった他の
+/// 項目に CLI オプションを設けていないのは、それらが設定ファイル
+/// （figment 経由）の役割であり、CLI 引数と設定ファイルで同じ内容を
+/// 二重に扱わないようにするため。
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
+    while let Some(arg) = args.next() {
+        if arg == "--config" {
+            return args
+                .next()
+                .map(PathBuf::from)
+                .ok_or_else(|| "--config には設定ファイルのパスが必要です".to_string());
+        }
+    }
+    Err("使い方: oci-cache --config <path>".to_string())
+}
+
+async fn run(config: Config) -> std::io::Result<()> {
+    let state = AppState::new(config.routing, config.storage_path)
+        .with_tag_manifest_ttl(config.tag_manifest_ttl)
+        .with_refresh_cooldown(config.force_refresh_cooldown);
+    let app = build_router(state);
+
+    let listener = TcpListener::bind(&config.listen)?;
+    tracing::info!(
+        listen = %config.listen,
+        tls = config.tls.is_some(),
+        "oci-cache: 待ち受けを開始します"
+    );
+
+    match config.tls {
+        // REQ-0054: 証明書と秘密鍵が設定されていれば TLS で待ち受ける。
+        Some((cert, key)) => serve_tls_on(listener, cert, key, app).await,
+        None => {
+            listener.set_nonblocking(true)?;
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            axum::serve(listener, app.into_make_service()).await
+        }
+    }
 }

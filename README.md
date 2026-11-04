@@ -2,7 +2,7 @@
 
 複数の上流レジストリに対応する、**パスを変えない**プルスルーキャッシュ。Web UI を同梱した単一実行ファイルとして動作する。
 
-> **状態: 想定順序1〜5（ルーティング・取得・保存・仕様準拠・UI）は実装済み。単一実行ファイルとしての起動（設定ファイルの読み込み）は未着手。**
+> **状態: 想定順序1〜5（ルーティング・取得・保存・仕様準拠・UI）は実装済み。`--config <path>` で設定ファイルを読み、実行ファイルとして起動できる。OCI distribution-spec の conformance スイート（取得系）も実際の docker.io に対して Green。容量による退避・GC を実際の配信経路（`BlobCache` / `ManifestCache`）へ結線することは未着手。**
 
 ## 解こうとしている問題
 
@@ -137,7 +137,7 @@ CI は4本に分けてある。
 |---|---|
 | `req-lint.yml` | 要求レジストリの矛盾と `generated/` の再生成漏れ |
 | `ci.yml` | `cargo fmt` / `cargo clippy` / `cargo test`、`Cargo.toml` が宣言する最小 Rust 版で組めるかの確認、amd64・arm64 双方のビルド（REQ-0050 / 0053） |
-| `conformance.yml` | 取得系の仕様準拠（REQ-0030）。**実装が済むまでは全件が落ちる**ので、無関係な PR を止めないよう非阻害にしてある |
+| `conformance.yml` | 取得系の仕様準拠（REQ-0030）。実際の docker.io に対して Green |
 | `release.yml` | タグを起点に両アーキテクチャの配布物を作ってリリースへ添付する（REQ-0053） |
 
 conformance を手元で回す場合は Go・`curl`・`jq` が要る。

@@ -336,6 +336,65 @@ async fn upstream_not_found_is_reported_as_404_not_502() {
     assert_eq!(blob_response.status(), StatusCode::NOT_FOUND);
 }
 
+/// 上流が OCI のエラー封筒（JSON）ではない本文で 404 を返す場合でも、
+/// システムは 502 ではなく 404 を返さなければならない。
+///
+/// 実際の docker.io は、タグ名の構文検証に失敗した参照（例:
+/// `.INVALID_MANIFEST_NAME`）に対し、JSON ではない素の
+/// "404 page not found" を返す（REQ-0030 の conformance スイートを実際の
+/// docker.io に対して実行して検出した）。この場合 `oci-client` は
+/// `RegistryError`（JSON 封筒）ではなく `ServerError`（封筒の解析失敗時の
+/// 代替）を返すため、`RegistryError` のエラーコードしか見ていないと
+/// 上流の 404 を取り落として 502 にしてしまう。
+#[tokio::test]
+async fn upstream_non_json_404_is_reported_as_404_not_502() {
+    let server = MockServer::start().await;
+    let repo = "library/nginx";
+    register_anonymous_v2(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/manifests/.INVALID_MANIFEST_NAME")))
+        .respond_with(ResponseTemplate::new(404).set_body_string("404 page not found"))
+        .mount(&server)
+        .await;
+
+    let app = single_upstream_app(&server);
+    let request = HttpRequest::builder()
+        .uri(format!(
+            "/v2/{repo}/manifests/.INVALID_MANIFEST_NAME?ns=docker.io"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// ダイジェストの形式自体が不正な参照（16進数として解釈できない等）を
+/// 要求した時、システムは 502（上流障害）を返してはならない。
+/// `BlobCache::blob_path` が取得前に形式を検証して弾くため、上流へは
+/// 一切問い合わせていない。これを上流障害と同じ 502 として返すのは
+/// 誤り（実際の docker.io に対する conformance スイート実行で検出。
+/// 上流スイートはこの場合 400 か 404 のいずれかを受け入れるため、本文を
+/// OCI のエラー封筒として構築する必要の無い 404 を返す）。
+#[tokio::test]
+async fn malformed_digest_reference_is_reported_as_404_not_502() {
+    let server = MockServer::start().await;
+    let repo = "library/nginx";
+    register_anonymous_v2(&server).await;
+
+    let app = single_upstream_app(&server);
+    let request = HttpRequest::builder()
+        .uri(format!(
+            "/v2/{repo}/manifests/sha256:totallywrong?ns=docker.io"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 /// REQ-0035: クライアントが Range ヘッダを指定して blob を要求した時、
 /// システムは指定された範囲のみを返さなければならない。
 #[tokio::test]

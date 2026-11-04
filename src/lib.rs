@@ -4,6 +4,7 @@
 //! 実装の進め方は `CLAUDE.md` と `docs/requirements/generated/traceability.md` を参照すること。
 
 pub mod cache;
+pub mod config;
 mod registry_auth;
 pub mod routing;
 pub mod server;

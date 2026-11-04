@@ -28,9 +28,27 @@ readonly LISTEN="${CONFORMANCE_LISTEN:-127.0.0.1:15000}"
 readonly ROOT_URL="http://${LISTEN}"
 
 # 上流のパス要素を付けない参照であること自体が要求（REQ-0006）なので、
-# 名前空間も上流を含まない形で与える
-readonly NAMESPACE="${CONFORMANCE_NAMESPACE:-library/hello-world}"
-readonly TAG="${CONFORMANCE_TAG:-latest}"
+# 名前空間も上流を含まない形で与える。
+#
+# 既定の対象は単一プラットフォームのマニフェストを持つ OCI アーティファクト
+# （Helm チャート）にしてある。コンテナイメージの公開タグはほぼ例外なく
+# マルチアーキ（Image Index）であり、上流スイートの「タグ参照がマニフェスト
+# 1件そのものの digest と一致する」という検証は、要求が無い限り
+# Accept ヘッダでは絞り込まれない（実際に docker.io の library/hello-world
+# で検証: Accept を単一マニフェストの型だけに絞っても Image Index が返る）。
+# システムは要求されたマニフェストがマニフェストリストならプラットフォーム
+# 選択を行わずそのまま返す（REQ-0034）ため、これはシステム側の不備ではなく、
+# 検証対象の選び方の問題。単一プラットフォームの対象に変えることで解消する。
+#
+# 対象は docker.io 上の Helm チャート（OCI アーティファクト）にしてある。
+# ghcr.io でも同種の対象（stefanprodan/charts/podinfo）を一度試したが、
+# blob の実体が redirect 先の CDN（pkg-containers.githubusercontent.com）
+# にあり、このスクリプトを動かすサンドボックス環境のプロキシでは当該ホストへ
+# の接続が通らなかった（docker.io の CDN redirect 先である
+# production.cloudfront.docker.com は通る）。入れ替えは実装の問題ではなく
+# 実行環境のネットワーク事情によるもの。
+readonly NAMESPACE="${CONFORMANCE_NAMESPACE:-bitnamicharts/nginx}"
+readonly TAG="${CONFORMANCE_TAG:-25.2.14}"
 
 for cmd in go curl jq; do
   command -v "$cmd" >/dev/null || { echo "必要なコマンドがありません: $cmd" >&2; exit 1; }
@@ -127,11 +145,17 @@ digest_of() {
 
 readonly MANIFEST_FILE="${WORK_DIR}/manifest.json"
 fetch_manifest "$TAG" "$MANIFEST_FILE"
-manifest_digest="$(digest_of "$MANIFEST_FILE")"
 
 # マニフェストリストが返った場合は blob を持つ子マニフェストまで降りる。
-# ここで降りるのは検証用の blob ダイジェストを得るためだけで、
-# リストをそのまま返すこと自体は REQ-0034 でスイートが確認する。
+# リストをそのまま返すこと自体は REQ-0034 でスイートが確認するので、ここで
+# 降りるのは検証用の blob ダイジェストを得るためだけ……のつもりだったが、
+# OCI_MANIFEST_DIGEST として渡すダイジェストも子マニフェストのものでなければ
+# ならない。上流 conformance スイートはこのダイジェストへの GET/HEAD を
+# `Accept: application/vnd.oci.image.manifest.v1+json`（単一マニフェストの
+# 型のみ）で行うため、マルチアーキのタグ（library/hello-world 等）で
+# トップレベルのまま（Image Index のダイジェスト）渡すと、システムが
+# REQ-0033 に従って正しく 406 を返しているだけなのに「200 が返らない」
+# 失敗になる（実際の docker.io に対して実行して検出した）。
 child_file="$MANIFEST_FILE"
 media_type="$(jq -r '.mediaType // ""' "$MANIFEST_FILE")"
 case "$media_type" in
@@ -140,6 +164,7 @@ case "$media_type" in
     fetch_manifest "$(jq -r '.manifests[0].digest' "$MANIFEST_FILE")" "$child_file"
     ;;
 esac
+manifest_digest="$(digest_of "$child_file")"
 blob_digest="$(jq -r '.config.digest' "$child_file")"
 
 echo "対象: ${NAMESPACE}:${TAG}"

@@ -97,6 +97,16 @@ impl AppState {
         self
     }
 
+    /// REQ-0018: 既定値ではなく運用者が設定したタグ参照マニフェストの
+    /// 有効期間を使う。`ManifestCache` 自体は `root` と `source` を内部に
+    /// 持つコンストラクタの形しか公開していないため、同じ `root` で
+    /// 作り直す。
+    pub fn with_tag_manifest_ttl(mut self, ttl: std::time::Duration) -> Self {
+        self.manifest_cache =
+            ManifestCache::with_tag_ttl(self.root.clone(), OciBlobSource::new(), ttl);
+        self
+    }
+
     pub(crate) fn upstreams(&self) -> &RoutingConfig {
         &self.upstreams
     }
@@ -271,6 +281,14 @@ async fn handle_v2_request(
 /// 502 のままにする。
 fn upstream_error_status(err: &BlobFetchError) -> StatusCode {
     match err {
+        // ダイジェストの形式自体が不正（例: `sha256:totallywrong`）な場合は
+        // 上流へ一切問い合わせていない（`BlobCache::blob_path` が取得前に
+        // 検証して弾く）ため、上流障害を示す 502 は適切でない。404 を返す
+        // （OCI Distribution Specification の conformance スイートは
+        // この場合 400 と 404 のいずれも受け入れており、404 なら本文を
+        // OCI のエラー封筒として構築する必要が無く済む。実際の docker.io
+        // に対する conformance スイート実行で検出）。
+        BlobFetchError::InvalidDigest(_) => StatusCode::NOT_FOUND,
         BlobFetchError::Pull { source, .. } if is_upstream_not_found(source) => {
             StatusCode::NOT_FOUND
         }
@@ -296,6 +314,14 @@ fn is_upstream_not_found(err: &OciDistributionError) -> bool {
                     | OciErrorCode::NameUnknown
             )
         }),
+        // 上流が OCI のエラー封筒ではない本文で 404 を返す場合（例:
+        // Docker Hub はタグ名の構文検証に失敗した参照に対し、JSON ではない
+        // 素の "404 page not found" を返す）、oci-client は封筒の解析に
+        // 失敗して `ServerError` へ落ちる（`validate_registry_response`
+        // 参照）。本文の形式にかかわらず上流が 404 を返したことに変わりは
+        // ないため、同様に扱う（実際の docker.io への conformance スイート
+        // 実行で検出）。
+        OciDistributionError::ServerError { code, .. } => *code == 404,
         _ => false,
     }
 }
