@@ -5,11 +5,23 @@
 //!
 //! 実装の順序は次を想定する。
 //!
-//! 1. ルーティング解決（REQ-0001 / REQ-0002 / REQ-0003 / REQ-0007 / REQ-0009 / REQ-0056 〜 REQ-0059）— `oci_cache::routing` として実装済み
-//! 2. 上流からの取得と中継（REQ-0010 / REQ-0051）— `oci_cache::cache` として実装済み
-//! 3. OCI Image Layout による保存（REQ-0020 / REQ-0021 / REQ-0022）
-//! 4. 仕様準拠（REQ-0030 〜 REQ-0036）
-//! 5. UI と観測（REQ-0040 〜 REQ-0047）
+//! 1. ルーティング解決（REQ-0001 〜 0003 / 0006 〜 0009 / 0056 〜 0059）— `oci_cache::routing` として実装済み
+//! 2. 上流からの取得と中継（REQ-0010 〜 0016 / 0018 / 0019 / 0051）— `oci_cache::cache` として実装済み
+//! 3. OCI Image Layout による保存（REQ-0020 〜 0029）— `oci_cache::storage` として実装済み
+//! 4. 仕様準拠（REQ-0030 〜 REQ-0036）— `oci_cache::server` / `oci_cache::cache` に実装済み。
+//!    `tests/conformance.rs` のうち上流の公式 conformance スイートを使う
+//!    `oci_distribution_spec_pull_suite`（REQ-0030）は、この実行ファイルが
+//!    まだ起動できないため Red のまま（下記参照）
+//! 5. UI と観測（REQ-0040 〜 REQ-0047 / REQ-0017 / REQ-0044）— `oci_cache::ui` として実装済み
+//!
+//! クライアント向け HTTP サーバー（REQ-0054 の TLS を含む）は
+//! `oci_cache::server` として実装済みだが、設定ファイルの読み込みが
+//! 無いため、この実行ファイルからはまだ起動できない。`oci_cache::server`
+//! は `oci_cache::cache`（`BlobCache` / `ManifestCache`）を直接使っており、
+//! blob・マニフェストの取得・保存自体は `oci_cache::storage::Layout`
+//! （容量による退避・GC）へまだ結線していない。`oci_cache::ui` が保持内容
+//! の一覧（REQ-0040 / 0041）のために使う `Layout` はタグの記録先としてのみ
+//! 結線済みで、同じ保存領域（`root`）を共有する。
 
 fn main() {
     eprintln!("oci-cache: 未実装です。docs/requirements/ を参照してください。");

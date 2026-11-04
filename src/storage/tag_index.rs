@@ -1,0 +1,189 @@
+//! 上流レジストリごとのタグ情報（README の `upstreams/<registry>/index.json`）。
+//!
+//! OCI Image Index の形式（`schemaVersion` / `mediaType` / `manifests`）に
+//! 従う。タグ名は `org.opencontainers.image.ref.name` アノテーションで表す
+//! （OCI Image Layout が定める慣例）。これにより `upstreams/<id>/` 配下に
+//! `oci-layout` と `blobs`（共有ストアへのシンボリックリンク）を揃えれば、
+//! 上流ごとのディレクトリ単体が skopeo/crane から検査できる有効な
+//! OCI Image Layout になる（REQ-0020 / REQ-0022）。
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+const REF_NAME_ANNOTATION: &str = "org.opencontainers.image.ref.name";
+const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+const INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestDescriptor {
+    #[serde(rename = "mediaType")]
+    media_type: String,
+    digest: String,
+    size: u64,
+    /// OCI の記述子では `annotations` は任意（REQ-0022 で参照する OCI
+    /// Image Layout の慣例上は `org.opencontainers.image.ref.name` を
+    /// 期待するが、仕様上は省略できる）。無い記述子も読み込めるよう既定値
+    /// を許す（CodeRabbit レビュー指摘）。
+    #[serde(default)]
+    annotations: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IndexFile {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+    #[serde(rename = "mediaType")]
+    media_type: String,
+    manifests: Vec<ManifestDescriptor>,
+}
+
+impl Default for IndexFile {
+    fn default() -> Self {
+        Self {
+            schema_version: 2,
+            media_type: INDEX_MEDIA_TYPE.to_string(),
+            manifests: Vec::new(),
+        }
+    }
+}
+
+/// 1つの上流レジストリに対応するタグ情報。
+pub struct TagIndex {
+    path: PathBuf,
+}
+
+impl TagIndex {
+    /// `dir` は呼び出し側が事前に用意した `upstreams/<id>/` ディレクトリ。
+    pub fn new(dir: PathBuf) -> Self {
+        Self {
+            path: dir.join("index.json"),
+        }
+    }
+
+    fn ref_name(repository: &str, tag: &str) -> String {
+        format!("{repository}:{tag}")
+    }
+
+    pub async fn get(&self, repository: &str, tag: &str) -> std::io::Result<Option<String>> {
+        let index = self.read().await?;
+        let ref_name = Self::ref_name(repository, tag);
+        Ok(index
+            .manifests
+            .iter()
+            .find(|m| m.annotations.get(REF_NAME_ANNOTATION) == Some(&ref_name))
+            .map(|m| m.digest.clone()))
+    }
+
+    /// `digest` を記録する。既存の記録を置き換えた場合は、その旧ダイジェスト
+    /// を返す（REQ-0025 の GC 契機の判定に使う）。
+    pub async fn put(
+        &self,
+        repository: &str,
+        tag: &str,
+        digest: &str,
+    ) -> std::io::Result<Option<String>> {
+        let mut index = self.read().await?;
+        let ref_name = Self::ref_name(repository, tag);
+        let position = index
+            .manifests
+            .iter()
+            .position(|m| m.annotations.get(REF_NAME_ANNOTATION) == Some(&ref_name));
+        let previous_digest = position.map(|i| index.manifests[i].digest.clone());
+        // CodeRabbit レビュー指摘: ダイジェストが変わっていなければ書き込む
+        // 内容も無い。`crate::server` はタグ参照が解決できるたびに
+        // （キャッシュ命中かどうかにかかわらず）`put` を呼ぶため、これが
+        // 無いと命中時にも毎回 index.json の読み書きが発生する。
+        if previous_digest.as_deref() == Some(digest) {
+            return Ok(None);
+        }
+
+        let descriptor = ManifestDescriptor {
+            media_type: MANIFEST_MEDIA_TYPE.to_string(),
+            digest: digest.to_string(),
+            size: 0,
+            annotations: HashMap::from([(REF_NAME_ANNOTATION.to_string(), ref_name)]),
+        };
+        match position {
+            Some(i) => index.manifests[i] = descriptor,
+            None => index.manifests.push(descriptor),
+        }
+        self.write(&index).await?;
+        Ok(previous_digest.filter(|previous| previous != digest))
+    }
+
+    /// 記録を削除する。実際に何かを削除できたかを返す。
+    pub async fn remove(&self, repository: &str, tag: &str) -> std::io::Result<bool> {
+        let mut index = self.read().await?;
+        let ref_name = Self::ref_name(repository, tag);
+        let before = index.manifests.len();
+        index
+            .manifests
+            .retain(|m| m.annotations.get(REF_NAME_ANNOTATION) != Some(&ref_name));
+        let removed = index.manifests.len() != before;
+        if removed {
+            self.write(&index).await?;
+        }
+        Ok(removed)
+    }
+
+    /// 記録済みのすべてのマニフェストダイジェスト（GC の到達判定の起点）。
+    pub async fn all_digests(&self) -> std::io::Result<Vec<String>> {
+        Ok(self
+            .read()
+            .await?
+            .manifests
+            .into_iter()
+            .map(|m| m.digest)
+            .collect())
+    }
+
+    /// 記録済みの `(repository, tag, digest)` の一覧（REQ-0040 の保持内容
+    /// 一覧表示が使う）。`org.opencontainers.image.ref.name`
+    /// アノテーション（`"{repository}:{tag}"`）を分解して復元する。
+    /// リポジトリ名・タグ名のいずれも `:` を含まない文法のため、最後の
+    /// `:` で区切れば一意に戻せる。アノテーションが無い、または形式が
+    /// 想定と異なる記述子（REQ-0022 の慣例に従わない外部ツールによる
+    /// 追記等）は一覧から静かに除く。
+    pub async fn list(&self) -> std::io::Result<Vec<(String, String, String)>> {
+        Ok(self
+            .read()
+            .await?
+            .manifests
+            .into_iter()
+            .filter_map(|m| {
+                let ref_name = m.annotations.get(REF_NAME_ANNOTATION)?;
+                let (repository, tag) = ref_name.rsplit_once(':')?;
+                Some((repository.to_string(), tag.to_string(), m.digest))
+            })
+            .collect())
+    }
+
+    async fn read(&self) -> std::io::Result<IndexFile> {
+        match tokio::fs::read(&self.path).await {
+            // 解析に失敗した内容を空の索引として扱うと、以降の put/remove が
+            // それを「正しく読めた空の索引」として上書き保存し、既存の
+            // タグ記録を黙って失う。GC（`compute_live_set`）もこの索引を
+            // 空と誤認し、まだ参照されている blob を回収してしまう
+            // （CodeRabbit レビュー指摘）。壊れている場合は呼び出し元に
+            // エラーとして伝える。
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(IndexFile::default()),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn write(&self, index: &IndexFile) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let content =
+            serde_json::to_vec_pretty(index).expect("IndexFile のシリアライズに失敗することはない");
+        let tmp_path = self.path.with_extension("json.tmp");
+        tokio::fs::write(&tmp_path, &content).await?;
+        tokio::fs::rename(&tmp_path, &self.path).await?;
+        Ok(())
+    }
+}
