@@ -35,6 +35,8 @@ pub enum ConfigError {
     InvalidDuration { key: &'static str, value: String },
     #[error("[server] tls_cert と tls_key は両方設定するか、両方省略してください（REQ-0054）")]
     IncompleteTls,
+    #[error("設定ファイル '{0}' が見つかりません")]
+    NotFound(PathBuf),
 }
 
 /// 起動に使う、読み込み済みの設定一式。
@@ -55,6 +57,15 @@ impl Config {
     /// `path` の TOML を読み、環境変数（`OCI_CACHE_<SECTION>__<KEY>`）で
     /// 上書きして構築する。
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        // `Toml::file` は指定したファイルが無くても空の辞書として扱い、
+        // 既定値だけで抽出を成功させてしまう。`--config` のパスを打ち間違え
+        // たり作業ディレクトリが想定と違ったりした場合、TLS 設定を含む
+        // ファイルの指定ごと無視されて平文 HTTP で起動してしまう
+        // （CodeRabbit レビュー指摘）。existence を明示的に確認する。
+        if !path.is_file() {
+            return Err(ConfigError::NotFound(path.to_path_buf()));
+        }
+
         let raw: RawConfig = Figment::new()
             .merge(Toml::file(path))
             .merge(Env::prefixed("OCI_CACHE_").split("__"))
@@ -162,13 +173,15 @@ impl Default for RawCache {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct RawStorage {
     path: String,
     // REQ-0026 / REQ-0027 の容量上限は、まだ配信経路（BlobCache /
     // ManifestCache）の退避処理へ結線していない（`crate::server`
     // のモジュール doc 参照）。設定しても現時点では効果が無いため、
-    // 誤って「効いている」と思わせないようここでは受け付けない。
+    // 誤って「効いている」と思わせないようここでは受け付けない
+    // （`deny_unknown_fields` で `capacity` 等を拒否する。これが無いと
+    // 書いても黙って無視されるだけだった。CodeRabbit レビュー指摘）。
 }
 
 impl Default for RawStorage {
@@ -204,6 +217,27 @@ struct RawUpstreamAuth {
     password: String,
 }
 
+/// `id`（例: `"docker.io"`）に対応する認証情報を環境変数から直接読む。
+///
+/// `figment` の `Env` provider は `__` をキーの階層区切りとして使うが、
+/// `.` も（TOML のドット付きキーと同じ扱いで）階層区切りとして解釈する
+/// ため、`OCI_CACHE_UPSTREAMS__DOCKER.IO__AUTH__USERNAME` のような変数名
+/// は `upstreams.docker.io.auth.username` ではなく
+/// `upstreams.docker.io.auth.username` の経路の途中で `"docker"` と
+/// `"io"` に分かれてしまい、`routing_config` が `upstreams.get("docker.io")`
+/// で引いても見つからない（CodeRabbit レビュー指摘。実測で確認済み）。
+/// `id` を含む変数名はここで `std::env::var` を直接呼んで組み立て、
+/// `figment` の階層解釈を経由しない。
+fn env_credentials(id: &str) -> Option<UpstreamCredentials> {
+    let key = id.replace(['.', '-'], "_").to_uppercase();
+    let username = std::env::var(format!("OCI_CACHE_AUTH_{key}_USERNAME")).ok();
+    let password = std::env::var(format!("OCI_CACHE_AUTH_{key}_PASSWORD")).ok();
+    match (username, password) {
+        (Some(username), Some(password)) => Some(UpstreamCredentials::new(username, password)),
+        _ => None,
+    }
+}
+
 impl RawConfig {
     /// REQ-0009: 設定順序を上流への問い合わせ順序とする。REQ-0008 により
     /// 対応する上流は固定の3つなので、既定の `RoutingConfig` から
@@ -217,11 +251,15 @@ impl RawConfig {
                 .find(id)
                 .cloned()
                 .ok_or_else(|| ConfigError::UnknownUpstream(id.clone()))?;
-            if let Some(auth) = self.upstreams.get(id).and_then(|entry| entry.auth.as_ref()) {
-                upstream = upstream.with_credentials(UpstreamCredentials::new(
-                    auth.username.clone(),
-                    auth.password.clone(),
-                ));
+            if let Some(credentials) = env_credentials(id).or_else(|| {
+                self.upstreams
+                    .get(id)
+                    .and_then(|entry| entry.auth.as_ref())
+                    .map(|auth| {
+                        UpstreamCredentials::new(auth.username.clone(), auth.password.clone())
+                    })
+            }) {
+                upstream = upstream.with_credentials(credentials);
             }
             upstreams.push(upstream);
         }
@@ -340,5 +378,94 @@ mod tests {
         let credentials = config.upstreams[0].credentials.as_ref().unwrap();
         assert_eq!(credentials.username, "alice");
         assert_eq!(credentials.password, "secret");
+    }
+
+    /// CodeRabbit レビュー指摘: `Toml::file` は指定したファイルが無くても
+    /// 空の辞書として扱い、既定値だけで抽出を成功させてしまう。
+    /// `--config` のパスを打ち間違えると、TLS 設定を含むファイルの指定
+    /// ごと無視されて平文 HTTP で起動してしまっていた。
+    #[test]
+    fn load_fails_when_config_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.toml");
+        assert!(matches!(
+            Config::load(&missing),
+            Err(ConfigError::NotFound(path)) if path == missing
+        ));
+    }
+
+    /// CodeRabbit レビュー指摘: `RawStorage` が `capacity` を受け付けず
+    /// 無視するだけでは、「書いても効かない」ことがエラーにならず伝わらない。
+    /// `deny_unknown_fields` で明示的に拒否する。
+    #[test]
+    fn load_rejects_unknown_storage_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[storage]\ncapacity = \"50GiB\"\n").unwrap();
+        assert!(matches!(
+            Config::load(&config_path),
+            Err(ConfigError::Load { .. })
+        ));
+    }
+
+    /// `OCI_CACHE_UPSTREAMS__DOCKER.IO__AUTH__PASSWORD` のような環境変数は
+    /// `.` が figment の階層区切りと衝突して適用されない
+    /// （CodeRabbit レビュー指摘。実測で確認済み）。`id` を直接埋め込んだ
+    /// 変数名で読む `env_credentials` が正しく拾えることを確かめる。
+    #[test]
+    fn env_credentials_reads_dotted_upstream_id() {
+        // `cargo test` はテストを並行実行するため、同じ環境変数名を使う
+        // `env_credentials_override_toml_auth_in_routing_config` と衝突
+        // しないよう、ここだけ架空の ID を使う（docker.io 等の既知の ID は
+        // そちらのテストに譲る）。
+        const USERNAME_KEY: &str = "OCI_CACHE_AUTH_EXAMPLE_IO_USERNAME";
+        const PASSWORD_KEY: &str = "OCI_CACHE_AUTH_EXAMPLE_IO_PASSWORD";
+        std::env::set_var(USERNAME_KEY, "env-alice");
+        std::env::set_var(PASSWORD_KEY, "env-secret");
+
+        let credentials = env_credentials("example.io");
+
+        std::env::remove_var(USERNAME_KEY);
+        std::env::remove_var(PASSWORD_KEY);
+
+        let credentials = credentials.expect("環境変数から認証情報を読めなかった");
+        assert_eq!(credentials.username, "env-alice");
+        assert_eq!(credentials.password, "env-secret");
+    }
+
+    /// 環境変数の認証情報は TOML の設定より優先される。
+    #[test]
+    fn env_credentials_override_toml_auth_in_routing_config() {
+        const USERNAME_KEY: &str = "OCI_CACHE_AUTH_DOCKER_IO_USERNAME";
+        const PASSWORD_KEY: &str = "OCI_CACHE_AUTH_DOCKER_IO_PASSWORD";
+        std::env::set_var(USERNAME_KEY, "env-alice");
+        std::env::set_var(PASSWORD_KEY, "env-secret");
+
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "docker.io".to_string(),
+            RawUpstreamEntry {
+                auth: Some(RawUpstreamAuth {
+                    username: "toml-alice".to_string(),
+                    password: "toml-secret".to_string(),
+                }),
+            },
+        );
+        let raw = RawConfig {
+            routing: RawRouting {
+                upstreams: vec!["docker.io".to_string()],
+                ..RawRouting::default()
+            },
+            upstreams,
+            ..RawConfig::default()
+        };
+        let config = raw.routing_config();
+
+        std::env::remove_var(USERNAME_KEY);
+        std::env::remove_var(PASSWORD_KEY);
+
+        let credentials = config.unwrap().upstreams[0].credentials.clone().unwrap();
+        assert_eq!(credentials.username, "env-alice");
+        assert_eq!(credentials.password, "env-secret");
     }
 }

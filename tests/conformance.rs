@@ -370,6 +370,34 @@ async fn upstream_non_json_404_is_reported_as_404_not_502() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+/// 上流が OCI のエラー封筒ではない本文で 404 以外のエラー（上流障害を
+/// 示す 5xx）を返した場合は、502 のままでなければならない。
+/// `is_upstream_not_found` の `ServerError` 分岐は `*code == 404` だけを
+/// 見ており、それ以外の `ServerError` まで 404 に広げていないことを
+/// 確かめる（CodeRabbit レビュー指摘: この分岐を広げても気づけるテストが
+/// 無かった）。
+#[tokio::test]
+async fn upstream_non_json_500_is_still_reported_as_502() {
+    let server = MockServer::start().await;
+    let repo = "library/nginx";
+    register_anonymous_v2(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{repo}/manifests/latest")))
+        .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+        .mount(&server)
+        .await;
+
+    let app = single_upstream_app(&server);
+    let request = HttpRequest::builder()
+        .uri(format!("/v2/{repo}/manifests/latest?ns=docker.io"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
+
 /// ダイジェストの形式自体が不正な参照（16進数として解釈できない等）を
 /// 要求した時、システムは 502（上流障害）を返してはならない。
 /// `BlobCache::blob_path` が取得前に形式を検証して弾くため、上流へは
@@ -388,6 +416,34 @@ async fn malformed_digest_reference_is_reported_as_404_not_502() {
         .uri(format!(
             "/v2/{repo}/manifests/sha256:totallywrong?ns=docker.io"
         ))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// ダイジェストの形式検証は、上流への到達性に関わらず（`?ns=` 無しで実際に
+/// 上流解決が行われる場合も）常に 404 を返す。`?ns=` を付けない要求では
+/// `router.resolve` が先に上流への到達性を確かめるため、この検証を
+/// `router.resolve` の後に置くと、形式が不正な参照でも上流が不通なだけで
+/// 502（上流障害）になってしまう（CodeRabbit レビュー指摘）。接続不能な
+/// 上流を設定し、実際に上流へ問い合わせていないことを確認する。
+#[tokio::test]
+async fn malformed_digest_reference_short_circuits_before_upstream_resolution() {
+    let repo = "library/nginx";
+    let config = RoutingConfig {
+        // 到達できない宛先。ここへ実際に問い合わせていれば 502 になる。
+        upstreams: vec![Upstream::new("docker.io", "http://127.0.0.1:1")],
+        probe_timeout: Duration::from_millis(200),
+        ..Default::default()
+    };
+    let store_dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(config, store_dir.path());
+    let app = build_router(state);
+
+    let request = HttpRequest::builder()
+        .uri(format!("/v2/{repo}/manifests/sha256:totallywrong"))
         .body(Body::empty())
         .unwrap();
     let response = app.oneshot(request).await.unwrap();

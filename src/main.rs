@@ -40,6 +40,15 @@ async fn main() -> ExitCode {
         Ok(config) => config,
         Err(err) => {
             eprintln!("oci-cache: 設定の読み込みに失敗しました: {err}");
+            // `ConfigError::Load` が保持する `figment::Error`（構文エラーや
+            // 型の不一致の詳細）は `source()` を辿らないと出力されない。
+            // これを出さないと、設定ファイルのどこが悪いのか運用者に
+            // 伝わらない（CodeRabbit レビュー指摘）。
+            let mut cause = std::error::Error::source(&err);
+            while let Some(source) = cause {
+                eprintln!("  原因: {source}");
+                cause = source.source();
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -57,16 +66,31 @@ async fn main() -> ExitCode {
 /// 項目に CLI オプションを設けていないのは、それらが設定ファイル
 /// （figment 経由）の役割であり、CLI 引数と設定ファイルで同じ内容を
 /// 二重に扱わないようにするため。
+///
+/// 不明な引数や `--config` の重複は拒否する。黙って無視すると、運用者が
+/// 指定したつもりの内容（例: 誤って付けた `--listen`）が実際には何の
+/// 効果も持たないまま起動してしまう（CodeRabbit レビュー指摘）。
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
+    let mut config_path = None;
     while let Some(arg) = args.next() {
-        if arg == "--config" {
-            return args
-                .next()
-                .map(PathBuf::from)
-                .ok_or_else(|| "--config には設定ファイルのパスが必要です".to_string());
+        match arg.as_str() {
+            "--config" => {
+                if config_path.is_some() {
+                    return Err("--config は一度だけ指定してください".to_string());
+                }
+                let path = args
+                    .next()
+                    .ok_or_else(|| "--config には設定ファイルのパスが必要です".to_string())?;
+                config_path = Some(PathBuf::from(path));
+            }
+            other => {
+                return Err(format!(
+                    "不明な引数です: {other}\n使い方: oci-cache --config <path>"
+                ));
+            }
         }
     }
-    Err("使い方: oci-cache --config <path>".to_string())
+    config_path.ok_or_else(|| "使い方: oci-cache --config <path>".to_string())
 }
 
 async fn run(config: Config) -> std::io::Result<()> {
@@ -90,5 +114,57 @@ async fn run(config: Config) -> std::io::Result<()> {
             let listener = tokio::net::TcpListener::from_std(listener)?;
             axum::serve(listener, app.into_make_service()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> impl Iterator<Item = String> {
+        values
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn parses_config_path() {
+        let path = parse_args(args(&["--config", "config.toml"])).unwrap();
+        assert_eq!(path, PathBuf::from("config.toml"));
+    }
+
+    #[test]
+    fn rejects_missing_path_value() {
+        assert!(parse_args(args(&["--config"])).is_err());
+    }
+
+    #[test]
+    fn rejects_no_arguments() {
+        assert!(parse_args(args(&[])).is_err());
+    }
+
+    /// CodeRabbit レビュー指摘: 不明な引数（例: タイプミスした
+    /// `--listen`）を黙って無視すると、運用者が指定したつもりの内容が
+    /// 実際には何の効果も持たないまま起動してしまう。
+    #[test]
+    fn rejects_unknown_argument() {
+        assert!(parse_args(args(&["--listen", "127.0.0.1:5000"])).is_err());
+        assert!(parse_args(args(&[
+            "--config",
+            "config.toml",
+            "--listen",
+            "127.0.0.1:5000"
+        ]))
+        .is_err());
+    }
+
+    /// CodeRabbit レビュー指摘: `--config` が複数回指定された場合、最初の
+    /// 1件だけを見て残りを黙って無視すると、運用者は最後に書いた方が
+    /// 効くと誤解する。
+    #[test]
+    fn rejects_duplicate_config_argument() {
+        assert!(parse_args(args(&["--config", "a.toml", "--config", "b.toml"])).is_err());
     }
 }

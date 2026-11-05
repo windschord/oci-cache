@@ -128,10 +128,27 @@ readonly INDEX_TYPES='application/vnd.oci.image.index.v1+json,application/vnd.do
 # マニフェストを1つ取得してファイルへ落とす。
 #   $1: 参照（タグまたはダイジェスト）
 #   $2: 保存先のパス
+#
+# `continue-on-error` を外した今、この取得が Docker Hub の匿名要求回数
+# 制限（429）に当たると、無関係な変更の PR まで赤くなる。`set -euo
+# pipefail` の下で `curl -f` は 1 回失敗すると即座にスクリプトを止めるため、
+# 一時的な失敗を再試行で吸収する（CodeRabbit レビュー指摘）。実装の不備は
+# この後も動くスイート本体の検証が引き続き検出する。
 fetch_manifest() {
-  curl -fsS --connect-timeout 5 --max-time 120 \
-    -H "Accept: ${SINGLE_TYPES},${INDEX_TYPES}" -o "$2" \
-    "${ROOT_URL}/v2/${NAMESPACE}/manifests/$1"
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if curl -fsS --connect-timeout 5 --max-time 120 \
+      -H "Accept: ${SINGLE_TYPES},${INDEX_TYPES}" -o "$2" \
+      "${ROOT_URL}/v2/${NAMESPACE}/manifests/$1"; then
+      return 0
+    fi
+    if [ "$attempt" -lt 5 ]; then
+      echo "対象の取得に失敗した（試行 ${attempt}/5、$((attempt * 5))秒後に再試行）。Docker Hub の要求回数制限等、一時的な失敗の可能性がある。" >&2
+      sleep $((attempt * 5))
+    fi
+  done
+  echo "対象の取得に5回失敗した: ${NAMESPACE}:$1" >&2
+  return 1
 }
 
 # ファイルの中身から sha256 のダイジェスト文字列を作る。
@@ -164,6 +181,21 @@ case "$media_type" in
     fetch_manifest "$(jq -r '.manifests[0].digest' "$MANIFEST_FILE")" "$child_file"
     ;;
 esac
+
+# `CONFORMANCE_NAMESPACE` / `CONFORMANCE_TAG` を上書きしてマルチアーキの
+# コンテナイメージを指定すると、1段降りた後も子マニフェストが入れ子の
+# Image Index のままになることがある。その場合に気付かず進めると、上で
+# 直した「タグ参照の digest と OCI_MANIFEST_DIGEST の不一致」の問題が
+# 静かに再発する（CodeRabbit レビュー指摘）。単一プラットフォームの
+# マニフェストに到達できていなければここで止める。
+child_media_type="$(jq -r '.mediaType // ""' "$child_file")"
+case "$child_media_type" in
+  *manifest.list.v2+json|*image.index.v1+json)
+    echo "対象 ${NAMESPACE}:${TAG} は単一プラットフォームのマニフェストに到達できません（子マニフェストも Image Index/マニフェストリストです）。CONFORMANCE_NAMESPACE / CONFORMANCE_TAG には単一プラットフォームのマニフェストを持つ対象を指定してください。" >&2
+    exit 1
+    ;;
+esac
+
 manifest_digest="$(digest_of "$child_file")"
 blob_digest="$(jq -r '.config.digest' "$child_file")"
 

@@ -172,6 +172,17 @@ async fn handle_v2_request(
     let Some((repository, verb, reference)) = split_v2_path(&rest) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+
+    // ダイジェスト参照の形式検証は上流への問い合わせより前に行う。`?ns=`
+    // が無い要求では `router.resolve` がまず上流への到達性を確かめる
+    // ため、ここで検証しないと形式が不正な参照でも上流が不通なだけで
+    // 502（上流障害）を返してしまい、要求自体が不正であることが伝わらない
+    // （CodeRabbit レビュー指摘）。`blob_cache.blob_path` はマニフェスト・
+    // blob のいずれのダイジェストにも同じ形式検証を使う。
+    if is_digest(reference) && state.blob_cache.blob_path(reference).is_err() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     let ns_hint = params.get("ns").map(String::as_str);
 
     let resolution = match state.router.resolve(repository, ns_hint).await {
