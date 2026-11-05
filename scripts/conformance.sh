@@ -163,41 +163,28 @@ digest_of() {
 readonly MANIFEST_FILE="${WORK_DIR}/manifest.json"
 fetch_manifest "$TAG" "$MANIFEST_FILE"
 
-# マニフェストリストが返った場合は blob を持つ子マニフェストまで降りる。
-# リストをそのまま返すこと自体は REQ-0034 でスイートが確認するので、ここで
-# 降りるのは検証用の blob ダイジェストを得るためだけ……のつもりだったが、
-# OCI_MANIFEST_DIGEST として渡すダイジェストも子マニフェストのものでなければ
-# ならない。上流 conformance スイートはこのダイジェストへの GET/HEAD を
-# `Accept: application/vnd.oci.image.manifest.v1+json`（単一マニフェストの
-# 型のみ）で行うため、マルチアーキのタグ（library/hello-world 等）で
-# トップレベルのまま（Image Index のダイジェスト）渡すと、システムが
-# REQ-0033 に従って正しく 406 を返しているだけなのに「200 が返らない」
-# 失敗になる（実際の docker.io に対して実行して検出した）。
-child_file="$MANIFEST_FILE"
+# タグ参照（$TAG）は単一プラットフォームのマニフェストに直接解決できる対象
+# でなければならない。マニフェストリスト/Image Index が返った場合、タグ
+# 応答の Docker-Content-Digest は常にリスト自身の digest であり（REQ-0034:
+# システムは要求されたマニフェストがマニフェストリストならプラットフォーム
+# 選択を行わずそのまま返す）、子マニフェストへ降りて得た digest を
+# OCI_MANIFEST_DIGEST として渡すと、タグ参照自体への応答と食い違う。
+#
+# 以前は子マニフェストへ降りて取り繕っていたが、それでも元の不一致は
+# 解消しない（降りた先が「さらに」入れ子の Image Index だった場合しか
+# 検出できていなかった）。`CONFORMANCE_NAMESPACE` / `CONFORMANCE_TAG` を
+# マルチアーキのコンテナイメージへ上書きした場合に備え、降りずにここで
+# 明確に停止する（CodeRabbit レビュー指摘: 1回目の対処が不十分だった）。
 media_type="$(jq -r '.mediaType // ""' "$MANIFEST_FILE")"
 case "$media_type" in
   *manifest.list.v2+json|*image.index.v1+json)
-    child_file="${WORK_DIR}/child-manifest.json"
-    fetch_manifest "$(jq -r '.manifests[0].digest' "$MANIFEST_FILE")" "$child_file"
-    ;;
-esac
-
-# `CONFORMANCE_NAMESPACE` / `CONFORMANCE_TAG` を上書きしてマルチアーキの
-# コンテナイメージを指定すると、1段降りた後も子マニフェストが入れ子の
-# Image Index のままになることがある。その場合に気付かず進めると、上で
-# 直した「タグ参照の digest と OCI_MANIFEST_DIGEST の不一致」の問題が
-# 静かに再発する（CodeRabbit レビュー指摘）。単一プラットフォームの
-# マニフェストに到達できていなければここで止める。
-child_media_type="$(jq -r '.mediaType // ""' "$child_file")"
-case "$child_media_type" in
-  *manifest.list.v2+json|*image.index.v1+json)
-    echo "対象 ${NAMESPACE}:${TAG} は単一プラットフォームのマニフェストに到達できません（子マニフェストも Image Index/マニフェストリストです）。CONFORMANCE_NAMESPACE / CONFORMANCE_TAG には単一プラットフォームのマニフェストを持つ対象を指定してください。" >&2
+    echo "対象 ${NAMESPACE}:${TAG} はマニフェストリスト/Image Index です。タグ応答の digest と OCI_MANIFEST_DIGEST が食い違うため、CONFORMANCE_NAMESPACE / CONFORMANCE_TAG には単一プラットフォームのマニフェストを持つ対象を指定してください。" >&2
     exit 1
     ;;
 esac
 
-manifest_digest="$(digest_of "$child_file")"
-blob_digest="$(jq -r '.config.digest' "$child_file")"
+manifest_digest="$(digest_of "$MANIFEST_FILE")"
+blob_digest="$(jq -r '.config.digest' "$MANIFEST_FILE")"
 
 echo "対象: ${NAMESPACE}:${TAG}"
 echo "  マニフェスト: ${manifest_digest}"
