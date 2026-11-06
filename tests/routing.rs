@@ -506,6 +506,27 @@ async fn fallback_reports_not_found_when_all_upstreams_miss() {
     assert!(matches!(error, RoutingError::NotFoundOnAnyUpstream));
 }
 
+/// `negative_cache_ttl` に極端に大きい値（設定ファイルの `parse_duration`
+/// は `u64` 秒まで受け付ける）を与えても、`Instant` の加算がパニックして
+/// 要求全体を落としてはならない（CodeRabbit レビュー指摘）。
+#[tokio::test]
+async fn negative_cache_ttl_overflow_does_not_panic() {
+    let (docker, docker_server) = spawn_upstream("docker.io").await;
+    let repo = "library/nginx";
+    register_not_found(&docker_server, repo).await;
+
+    let config = RoutingConfig {
+        upstreams: vec![docker],
+        probe_timeout: Duration::from_secs(5),
+        negative_cache_ttl: Duration::MAX,
+    };
+    let router = Router::new(config, probe(), InMemoryRoutingMemo::default());
+
+    let error = router.resolve(repo, None).await.unwrap_err();
+
+    assert!(matches!(error, RoutingError::NotFoundOnAnyUpstream));
+}
+
 /// 設定再読み込み中（新しい `Router` が作られた後）に、探索を続けていた古い
 /// `Router` の結果がメモへ書き戻らないことを確かめる
 /// （CodeRabbit レビュー指摘: 世代をまたいだ書き込みのレース）。

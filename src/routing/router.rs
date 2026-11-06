@@ -105,11 +105,17 @@ where
 
         match self.resolve_via_fallback(repository).await {
             Err(RoutingError::NotFoundOnAnyUpstream) => {
-                self.memo.put_negative(
-                    repository,
-                    tokio::time::Instant::now() + self.config.negative_cache_ttl,
-                    self.generation,
-                );
+                // `negative_cache_ttl` は設定ファイル経由で任意の大きさを
+                // 指定できる。`Instant` の加算は表現可能な範囲を超えると
+                // パニックするため、超える場合は記録自体を諦める（CodeRabbit
+                // レビュー指摘）。次回の要求は③からやり直すだけで、誤って
+                // 不存在のまま固定されるわけではない。
+                if let Some(expires_at) =
+                    tokio::time::Instant::now().checked_add(self.config.negative_cache_ttl)
+                {
+                    self.memo
+                        .put_negative(repository, expires_at, self.generation);
+                }
                 Err(RoutingError::NotFoundOnAnyUpstream)
             }
             other => other,

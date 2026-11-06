@@ -2,7 +2,7 @@
 
 複数の上流レジストリに対応する、パスを変えないプルスルーキャッシュ。Rust 製の単一実行ファイル。
 
-**現状: 要求定義は完了、実装は未着手。** `src/main.rs` はスタブ。
+**現状: 要求定義・実装（想定順序1〜5）は完了。** `src/main.rs` は `--config <path>` で設定ファイル（`config.example.toml` 参照）を読み、実行ファイルとして起動できる。
 
 ## 最初に読むもの
 
@@ -63,7 +63,7 @@ graphify explain "<概念>"          # 個別モジュール・要求の役割�
 
 push 系のテストは REQ-0031 により意図的に未実装なので skip 設定で落とす。skip するのは上流の conformance スイートが持つ push 系テストだけで、書き込み系エンドポイントが返す応答（REQ-0036 の HTTP 405）は自前の `tests/conformance.rs::push_request_is_rejected_as_not_allowed` で検証する。
 
-実行手順は `scripts/conformance.sh` にある。上流スイートは既定では push でテスト対象を用意するので、代わりに1つ取得してキャッシュを温め、その結果のダイジェストを `OCI_MANIFEST_DIGEST` / `OCI_BLOB_DIGEST` として渡している。CI は `.github/workflows/conformance.yml`。実装が済むまで全件落ちるため、無関係な PR を止めないよう `continue-on-error` を付けてある。**取得系が通るようになったらこの行を外すこと。**
+実行手順は `scripts/conformance.sh` にある。上流スイートは既定では push でテスト対象を用意するので、代わりに1つ取得してキャッシュを温め、その結果のダイジェストを `OCI_MANIFEST_DIGEST` / `OCI_BLOB_DIGEST` として渡している。対象は単一プラットフォームのマニフェストを持つ OCI アーティファクト（docker.io 上の Helm チャート）を既定にしてある。コンテナイメージの公開タグはほぼ例外なくマルチアーキ（Image Index）であり、タグ参照がマニフェスト1件の digest と一致することを求める上流スイートの検証には噛み合わないため（REQ-0034 により、要求されたマニフェストがマニフェストリストならシステムはプラットフォーム選択を行わずそのまま返す）。CI は `.github/workflows/conformance.yml`。取得系は Green になったため `continue-on-error` は外してある。
 
 ### CI の分担
 
@@ -71,7 +71,7 @@ push 系のテストは REQ-0031 により意図的に未実装なので skip �
 |---|---|
 | `req-lint.yml` | 要求レジストリの矛盾と `generated/` の再生成漏れ |
 | `ci.yml` | `fmt` / `clippy` / `test`、宣言した最小 Rust 版での `check`、amd64・arm64 双方のビルド（REQ-0050 / 0053） |
-| `conformance.yml` | 取得系の仕様準拠（REQ-0030）。当面 Red |
+| `conformance.yml` | 取得系の仕様準拠（REQ-0030）。Green |
 | `release.yml` | タグを起点に両アーキテクチャの配布物を作る（REQ-0053） |
 
 検証手段が `review` の要求（REQ-0050 / 0053 / 0055）の確認手順は `docs/verification/review.md` にある。設計書ではないので、この文書は作ってよい。
