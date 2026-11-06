@@ -131,19 +131,36 @@ readonly INDEX_TYPES='application/vnd.oci.image.index.v1+json,application/vnd.do
 #
 # `continue-on-error` を外した今、この取得が Docker Hub の匿名要求回数
 # 制限（429）に当たると、無関係な変更の PR まで赤くなる。`set -euo
-# pipefail` の下で `curl -f` は 1 回失敗すると即座にスクリプトを止めるため、
-# 一時的な失敗を再試行で吸収する（CodeRabbit レビュー指摘）。実装の不備は
-# この後も動くスイート本体の検証が引き続き検出する。
+# pipefail` の下で失敗すると即座にスクリプトを止めるため、一時的な失敗を
+# 再試行で吸収する（CodeRabbit レビュー指摘）。実装の不備はこの後も動く
+# スイート本体の検証が引き続き検出する。
+#
+# 再試行は 429・5xx・通信断（接続できず応答コード自体が無い場合）に限る。
+# 存在しないタグ等の恒久的な 4xx まで5回再試行すると、最大50秒待って
+# ようやく失敗するだけで無意味に遅くなる（CodeRabbit レビュー指摘）。
+#
+# 上流の認証拒否は本システムでは 502 に変換され、一時的な上流障害の 502
+# と応答だけでは区別できない。ただしこのスクリプトが生成する設定には
+# `[upstreams]` の認証情報を一切書いておらず匿名取得のみなので、この
+# スクリプトの実行では認証拒否による 502 はそもそも起こり得ない。
 fetch_manifest() {
-  local attempt
+  local attempt status
   for attempt in 1 2 3 4 5; do
-    if curl -fsS --connect-timeout 5 --max-time 120 \
+    status="$(curl -sS --connect-timeout 5 --max-time 120 \
       -H "Accept: ${SINGLE_TYPES},${INDEX_TYPES}" -o "$2" \
-      "${ROOT_URL}/v2/${NAMESPACE}/manifests/$1"; then
+      -w '%{http_code}' "${ROOT_URL}/v2/${NAMESPACE}/manifests/$1" || true)"
+    if [ "$status" = 200 ]; then
       return 0
     fi
+    case "$status" in
+      000 | 429 | 5??) ;; # 通信断・レート制限・上流の一時的障害は再試行対象
+      *)
+        echo "対象の取得に失敗した（恒久的な HTTP ${status:-不明}）: ${NAMESPACE}:$1" >&2
+        return 1
+        ;;
+    esac
     if [ "$attempt" -lt 5 ]; then
-      echo "対象の取得に失敗した（試行 ${attempt}/5、$((attempt * 5))秒後に再試行）。Docker Hub の要求回数制限等、一時的な失敗の可能性がある。" >&2
+      echo "対象の取得に失敗した（試行 ${attempt}/5、HTTP ${status}、$((attempt * 5))秒後に再試行）。Docker Hub の要求回数制限等、一時的な失敗の可能性がある。" >&2
       sleep $((attempt * 5))
     fi
   done
@@ -175,7 +192,11 @@ fetch_manifest "$TAG" "$MANIFEST_FILE"
 # 検出できていなかった）。`CONFORMANCE_NAMESPACE` / `CONFORMANCE_TAG` を
 # マルチアーキのコンテナイメージへ上書きした場合に備え、降りずにここで
 # 明確に停止する（CodeRabbit レビュー指摘: 1回目の対処が不十分だった）。
-media_type="$(jq -r '.mediaType // ""' "$MANIFEST_FILE")"
+#
+# OCI Image Index の `mediaType` は省略可能なので、それだけを見ると
+# mediaType を省略した Image Index を単一マニフェストと誤認する
+# （CodeRabbit レビュー指摘）。`manifests` 配列の有無でも判定する。
+media_type="$(jq -r 'if (.manifests? | type) == "array" then "application/vnd.oci.image.index.v1+json" else (.mediaType // "") end' "$MANIFEST_FILE")"
 case "$media_type" in
   *manifest.list.v2+json|*image.index.v1+json)
     echo "対象 ${NAMESPACE}:${TAG} はマニフェストリスト/Image Index です。タグ応答の digest と OCI_MANIFEST_DIGEST が食い違うため、CONFORMANCE_NAMESPACE / CONFORMANCE_TAG には単一プラットフォームのマニフェストを持つ対象を指定してください。" >&2
