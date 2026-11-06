@@ -135,32 +135,50 @@ readonly INDEX_TYPES='application/vnd.oci.image.index.v1+json,application/vnd.do
 # 再試行で吸収する（CodeRabbit レビュー指摘）。実装の不備はこの後も動く
 # スイート本体の検証が引き続き検出する。
 #
-# 再試行は 429・5xx・通信断（接続できず応答コード自体が無い場合）に限る。
+# 再試行は 429・5xx・通信断（接続不能・応答本文の転送失敗を含む）に限る。
 # 存在しないタグ等の恒久的な 4xx まで5回再試行すると、最大50秒待って
 # ようやく失敗するだけで無意味に遅くなる（CodeRabbit レビュー指摘）。
 #
 # 上流の認証拒否は本システムでは 502 に変換され、一時的な上流障害の 502
-# と応答だけでは区別できない。ただしこのスクリプトが生成する設定には
-# `[upstreams]` の認証情報を一切書いておらず匿名取得のみなので、この
-# スクリプトの実行では認証拒否による 502 はそもそも起こり得ない。
+# と応答だけでは区別できない。このスクリプトが生成する設定ファイルには
+# `[upstreams]` の認証情報を書かないが、`src/config.rs` の
+# `env_credentials` は設定ファイルの内容と無関係に
+# `OCI_CACHE_AUTH_DOCKER_IO_USERNAME` 等の環境変数を読むため、実行環境に
+# それが設定されていれば認証拒否による 502 も起こりうる（CodeRabbit
+# レビュー指摘: 前回の「起こり得ない」という説明は言い過ぎだった）。
+# この区別は HTTP ステータスだけでは付けられないため、ここでは一時的な
+# 上流障害として再試行する。
 fetch_manifest() {
-  local attempt status
+  local attempt status curl_rc
   for attempt in 1 2 3 4 5; do
-    status="$(curl -sS --connect-timeout 5 --max-time 120 \
+    # `set -euo pipefail` の下でも `curl` 自体の失敗でスクリプトを止めず
+    # 再試行させるため、`if` の条件式として実行する。応答本文の転送が
+    # 途中で失敗した場合、ステータス行は既に受信済みで `-w` は 200 を
+    # 表示しうるが、curl の終了コードは非 0 になる。終了コードも合わせて
+    # 見ないと、不完全な本文を成功と誤認する（CodeRabbit レビュー指摘）。
+    if status="$(curl -sS --connect-timeout 5 --max-time 120 \
       -H "Accept: ${SINGLE_TYPES},${INDEX_TYPES}" -o "$2" \
-      -w '%{http_code}' "${ROOT_URL}/v2/${NAMESPACE}/manifests/$1" || true)"
-    if [ "$status" = 200 ]; then
+      -w '%{http_code}' "${ROOT_URL}/v2/${NAMESPACE}/manifests/$1")"; then
+      curl_rc=0
+    else
+      curl_rc=$?
+    fi
+    if [ "$curl_rc" -eq 0 ] && [ "$status" = 200 ]; then
       return 0
     fi
-    case "$status" in
-      000 | 429 | 5??) ;; # 通信断・レート制限・上流の一時的障害は再試行対象
-      *)
-        echo "対象の取得に失敗した（恒久的な HTTP ${status:-不明}）: ${NAMESPACE}:$1" >&2
-        return 1
-        ;;
-    esac
+    if [ "$curl_rc" -ne 0 ]; then
+      : # 通信断・応答本文の転送失敗は再試行対象
+    else
+      case "$status" in
+        429 | 5??) ;; # レート制限・上流の一時的障害（認証拒否の502含む）は再試行対象
+        *)
+          echo "対象の取得に失敗した（恒久的な HTTP ${status:-不明}）: ${NAMESPACE}:$1" >&2
+          return 1
+          ;;
+      esac
+    fi
     if [ "$attempt" -lt 5 ]; then
-      echo "対象の取得に失敗した（試行 ${attempt}/5、HTTP ${status}、$((attempt * 5))秒後に再試行）。Docker Hub の要求回数制限等、一時的な失敗の可能性がある。" >&2
+      echo "対象の取得に失敗した（試行 ${attempt}/5、HTTP ${status:-不明}・curl終了コード ${curl_rc}、$((attempt * 5))秒後に再試行）。Docker Hub の要求回数制限等、一時的な失敗の可能性がある。" >&2
       sleep $((attempt * 5))
     fi
   done
